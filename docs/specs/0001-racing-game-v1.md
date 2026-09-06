@@ -1,112 +1,89 @@
-# Spec: Racing Game v1 — pseudo-3D time-attack with daily/weekly generated Tracks
+# Racing Game v1 — native Rust top-down racer with AI opponents
 
 ## Problem Statement
 
-Players who want a quick, skill-deep racing fix in the browser have two bad options: heavy 3D racers that punish low-end devices and phones, or shallow toys with no competitive spine. No browser racer ships a shared daily/weekly generated Track with Leaderboard Ghosts — the one competitive loop that costs almost nothing to run. And everywhere, the small skill verbs that make racing worth mastering (the slide, the late lift) are either behind a wall of buttons or absent entirely.
+The previous TypeScript browser racer was deleted on purpose; the project restarts as a native Rust game. There is currently nothing runnable: no project scaffold, no driving, no Track, no Race. The player wants a desktop top-down racing game in Rust that feels like a real racer — speed you carry through corners, rivals to beat — not an on-rails arcade toy.
 
 ## Solution
 
-A pseudo-3D time-attack racing game that runs in a browser tab on desktop and phone with zero install. Every Track is generated from a seed: a new Daily Challenge and Weekly Challenge give everyone worldwide the same road and the same Leaderboard, and Generate and Share lets players roll fresh Tracks and trade Track Codes. Competition is asynchronous and account-free: your best Run is saved locally, you race it as a Ghost, you pick rival Ghosts off the Leaderboard, and you post your own times with just a display name.
-
-The car has exactly two inputs: steer, and Accelerate. Holding Accelerate builds speed; releasing it (Coast) bleeds speed. There is no brake and no drift button: Drift happens when you corner too hot, and a well-judged slide is measurably the fastest way down the road — while a sloppy one runs you wide. Mastery is entry speed and Coast timing, nothing else.
+A native desktop (Bevy) top-down racer: one hand-authored closed Track, the player's Car plus 3 AI Opponents, 3-lap Races with live positions and lap timing, custom 2D physics (lateral grip with slip, surfaces, walls), keyboard controls, a minimal shell (menu → countdown → race → results) with local best-lap persistence.
 
 ## User Stories
 
-1. As a desktop player, I want to steer with the keyboard, so that I can drive with familiar controls.
-2. As a desktop player, I want speed to rise while Accelerate is held and fall while it is released, so that Coast timing is my speed control.
-3. As a mobile player, I want a floating joystick that appears where my thumb lands, so that steering works in any grip.
-4. As a mobile player, I want an Accelerate pad under my right thumb, so that speed control matches desktop exactly.
-5. As a player, I want the car to slide when I corner too fast, so that Drift emerges from driving rather than from a button.
-6. As a player, I want a well-judged Drift to carry more corner speed, so that Drift is the faster way down the road.
-7. As a player, I want a sloppy entry to run wide and cost time, so that sloppiness is punished and precision matters.
-8. As a player, I want no driving assists of any kind, so that my Run reflects only my driving.
-9. As a player, I want the car to yaw and leave skid marks while sliding, so that I can read the Drift.
-10. As a player, I want to restart a lap with one keypress, so that "one more Run" is instant and a crash is never a dead end.
-11. As a player, I want every Track to lap in 40–70 seconds, so that a Run fits into a spare moment.
-12. As a player, I want checkpoints on every Track, so that cutting is impossible and Leaderboard times are honest.
-13. As a competitive player, I want per-checkpoint splits for my Run, so that I can see where I gain and lose time.
-14. As a player, I want my best Run on each Track saved on my device, so that I always have a target.
-15. As a player, I want to race my best Run as a Ghost, so that I am always chasing myself.
-16. As a player, I want to pick Ghosts from the Leaderboard, so that rivals near my time give me something to beat.
-17. As a player, I want a global Leaderboard per Track, so that I know where I stand worldwide.
-18. As a player, I want to submit my Run to the Leaderboard, so that others have something to chase.
-19. As a player, I want a display name stored on my device, so that my Runs carry my name without an account.
-20. As a player, I want to edit my display name at any time, so that my identity on the Leaderboard stays mine.
-21. As a player, I want a new Daily Challenge at UTC midnight, so that there is a reason to come back every day.
-22. As a player, I want a new Weekly Challenge every Monday at UTC, so that I have a longer arc to master.
-23. As a player, I want the Daily and Weekly Challenge identical for everyone, so that the Leaderboard compares fairly.
-24. As a returning player, I want past Daily and Weekly Challenges playable forever, so that no Track ever dies.
-25. As a player, I want unlimited retries on every Track, so that mastery is a loop, not a gate.
-26. As a player, I want Generate and Share to roll a fresh Track, so that there is always a new road.
-27. As a player, I want a difficulty class picker in Generate and Share, so that I choose my own level.
-28. As a player, I want to share a Track Code, so that anyone can race exactly my Track.
-29. As a player, I want to paste a Track Code, so that I can race Tracks other players generated.
-30. As a player, I want identical Track Codes to build identical Tracks, so that sharing never breaks.
-31. As a mobile player, I want the game rendered at my screen's pixel density, so that it is sharp, not blurry.
-32. As an offline player, I want to race my PB Ghost on any Track I already have, so that losing the network never ends a session.
-33. As a player, I want the Leaderboard to reappear when the network returns, so that connectivity loss is invisible when possible.
-34. As a new player, I want to be driving within seconds of opening the page, so that nothing stands between me and the road.
+1. As a player, I want to launch the game into a menu, so that I can start a Race or quit.
+2. As a player, I want the menu to show my saved best lap, so that I have a target to beat.
+3. As a player, I want a countdown before the Race starts, so that I can prepare to accelerate.
+4. As a player, I want to accelerate with a key, so that I can build speed down straights.
+5. As a player, I want to brake, so that I can slow for corners.
+6. As a player, I want to reverse, so that I can recover after spinning or hitting a wall.
+7. As a player, I want to steer left and right, so that I can hold a racing line.
+8. As a player, I want a handbrake, so that I can provoke a Drift into tight corners.
+9. As a player, I want the Car to carry speed through corners with lateral grip and slip angle, so that cornering feels physical rather than on-rails.
+10. As a player, I want the off-Track surface to be slower and slippier than road, so that staying on the Track matters.
+11. As a player, I want wall contacts to bleed speed and bounce the Car, so that crashes punish without hard-stopping the Race.
+12. As a player, I want weight transfer under braking and acceleration to affect grip, so that how I enter a corner changes handling.
+13. As a player, I want the camera to follow my Car without rotating the world, so that I always know my orientation.
+14. As a player, I want a fixed zoom with letterboxing, so that speed and spacing read consistently at any window size.
+15. As a player, I want a lap counter, so that I know my progress through the 3-lap Race.
+16. As a player, I want a live lap timer, so that I can gauge the lap I am driving.
+17. As a player, I want my best lap shown during the Race, so that I can compare the current lap against it.
+18. As a player, I want live Race positions (1st–4th), so that I know where I stand against the AI Opponents.
+19. As a player, I want a speed readout, so that I can sense acceleration and top speed.
+20. As a player, I want 3 AI Opponents racing the same Track, so that I compete rather than time-trial.
+21. As a player, I want AI Opponents to follow a racing line and slow for corners, so that they drive believably.
+22. As a player, I want AI Opponents to hold a fixed skill level with no rubber-banding, so that wins and losses feel earned.
+23. As a player, I want AI Cars to collide with walls, the Track surface, and me like any other Car, so that the Race feels fair.
+24. As a player, I want the Race to end after 3 laps, so that there is a clear finish.
+25. As a player, I want a results screen with finishing order and lap times, so that I can review my performance.
+26. As a player, I want to restart a Race immediately, so that I can retry without leaving to the menu.
+27. As a player, I want my best lap saved locally on this machine, so that it persists across sessions.
+28. As a player, I want ESC to leave a Race for the menu, so that I can exit cleanly.
+29. As a player, I want engine and skid audio (stretch), so that driving feels alive.
+30. As a developer, I want the simulation to be a plain-Rust deterministic fixed-step module with no Bevy dependency, so that physics, AI, laps, and race flow are testable headlessly.
+31. As a developer, I want Track files validated by a dedicated parser seam, so that malformed Track data fails loudly with a useful error.
+32. As a developer, I want tests that drive the simulation seam with scripted input streams, so that handling, surfaces, walls, lap counting, race flow, and AI behavior are pinned by observable snapshots.
+33. As a developer, I want CI to run `cargo fmt`/`clippy`/tests, so that the Rust pipeline replaces the retired npm workflows.
+34. As a developer, I want the Bevy shell to hold no game rules, so that rendering/input glue can change without touching behavior under test.
+35. As a developer, I want a single cutover commit that removes the TypeScript game, its workers, the legacy ADRs, the legacy research note, and the npm/vite/wrangler workflows from the repository, so that origin/main agrees with the fresh Rust restart and no future push runs the retired pipeline.
+36. As a developer, I want the engine and physics posture recorded as ADR-0001 (Bevy + custom physics, no physics crate), so that the decision is binding and future sessions do not re-litigate it.
 
 ## Implementation Decisions
 
-Governed by ADRs 0001–0006 and the glossary in `CONTEXT.md` (pseudo-3D camera; deterministic hand-written simulation; generated-only Tracks; PvP excluded; client-validated Run integrity; emergent Drift with Coast-only controls).
-
-**Stack and deployment.** TypeScript + Vite, zero game frameworks, Canvas 2D. The client is fully static and deploys to GitHub Pages; any visitor gets the complete game and Leaderboard from the URL alone.
-
-**Deterministic core (the test seam).** Two pure functions carry the whole domain:
-- Simulation step: fixed-timestep, road-space state (position along Track, lateral offset, lateral velocity, speed). Same inputs plus same Track produce bit-identical simulation on the same engine. A Run records its input timeline only — that recording is the replay.
-- Track generator: (generator version, difficulty class, seed) → segment list with per-segment curve and hill values, length, and checkpoint placement. Pure; generator versions are frozen once released so existing Track Codes never change meaning.
-
-**Car physics.** Road-space slip model with a clamped lateral impulse: cornering adds lateral velocity, grip cancels it up to the clamp, saturation is a slide. No physics library. Drift is emergent — no drift input exists on any platform.
-
-**Controls.** Desktop: hold a key to Accelerate, two keys to steer. Touch: floating joystick (left thumb, steer only) + Accelerate pad (right thumb). Speed rises on a curve while Accelerate is held and falls on a curve while released (Coast), identically on both platforms. No brake, no assists, no reverse gear — recovery is the one-keypress lap restart.
-
-**Coast feasibility invariant (ADR-0006).** On every generated corner, Coast decel must cover the speed window between a hot entry and the grip speed, using only the approach before turn-in. The generator must never emit a corner that violates this.
-
-**Drift bench (CI gate).** The same closed-loop driver (seeded jitter, reads car state every frame) drives the shipped physics in all arms, differing only in Coast timing: CONSERVATIVE (coasts early, never slides), DRIFT (coasts later, slides, carries speed), OVERDRIVE (coasts too late, runs wide). Gates on a fixed ~10-seed suite: DRIFT strictly faster than CONSERVATIVE; OVERDRIVE strictly slower; DRIFT advantage capped at 30% of a lap; null run (identical arms) agrees within 1%. Drift pays in speed only — no boost rewards in v1.
-
-**Track Code.** Shareable string encoding generator version, difficulty class, and seed. Identical code → identical Track. Round-trip codec.
-
-**Content.** Daily Challenge: seed derived from the UTC calendar date; Weekly Challenge: seed derived from the ISO week, one difficulty class harder than Daily; both rotate at fixed UTC boundaries and keep permanent Leaderboards. Generate and Share: difficulty class picker (3 classes), fresh-seed roller, and Track Code entry.
-
-**Ghosts.** Personal best stored locally; race-the-Leaderboard lets the player pick rival Runs to spawn as Ghosts. Ghost playback is a plain input replay through the simulation step; no netcode, no server state.
-
-**Run integrity.** Checkpoint gates at generator-placed Track positions; every Run records per-checkpoint times (these double as the splits display). Validation is client-side (ADR-0005); the server does not re-simulate.
-
-**Leaderboard service.** Cloudflare Worker + D1 (rankings) + R2 (input blobs). Endpoints: submit Run (Track Code, display name, time, checkpoint times, input blob reference), fetch Leaderboard per Track Code, fetch a Run's input blob. No auth. The client degrades gracefully offline: local PB Ghosts and any loaded Track stay fully playable; Leaderboard views and submissions resume when the network returns.
-
-**Renderer.** Canvas 2D pseudo-3D projection over the segment list; back the canvas at devicePixelRatio, CSS-size the element; touch surface uses `touch-action: none`; fixed-step accumulator with render interpolation and clamped frame delta (background-tab safe).
-
-**Local persistence.** Display name, per-Track personal bests, and input timelines in local storage.
+- **Fresh start.** The TypeScript game, its ADRs, spec, and issue #1 are retired. Rust workspace scaffolded from scratch; this spec is the single source of truth.
+- **Engine: Bevy.** Owns window, input, rendering, audio, schedules. Chosen over macroquad for the scheduler (`FixedUpdate`), input/audio subsystems, and room to grow (see ADR-0001 and research notes).
+- **Simulation module (seam 1).** Plain Rust, zero Bevy types. Constructors take a `Track` and Car setup; the tick function advances the world one fixed step (64 Hz) from a set of per-Car inputs (player-mapped + AI-generated) and returns a snapshot: race phase, laps, lap times, positions, per-Car pose/velocity/surface/contacts. All game rules live here.
+- **Custom physics, no physics engine.** Longitudinal: throttle/brake/reverse force, drag, rolling resistance. Lateral: grip with slip angle; handbrake reduces lateral grip to provoke Drift. Light weight transfer under braking/acceleration biases front/rear grip. Walls: bounce with speed loss. Surfaces: road vs off-Track grip and drag factors. Rapier/Avian deliberately not used in v1 (ADR-0001).
+- **Track model (seam 2).** A hand-authored data file (data-driven, one circuit in v1): center polyline, width, surface segments. The parser validates geometry (closed loop, positive width, known surfaces) and returns a typed `Track` or a descriptive error. Additional hand-made Tracks drop in as data; generated Tracks are future work.
+- **AI Opponents.** Three Cars driven inside the simulation: waypoint racing line, corner slowdown from upcoming curvature, small lateral offsets so they don't stack, fixed skill. They emit the same per-Car inputs as the player; no rubber-banding.
+- **Race flow.** Phases: countdown → racing → finished. 3 laps, 4 Cars, live positions, per-lap timing, best lap. Lap validation uses ordered progress along the Track so cuts and reversals don't count.
+- **Camera/render.** World-aligned orthographic camera following the player Car, fixed zoom, letterboxed; render interpolates between fixed steps; the shell renders snapshots only.
+- **Input.** Keyboard only: arrows/WASD throttle-brake-steer, Space handbrake, reverse when stopped and braking, ESC to menu. The shell maps keys to the simulation's input struct; the simulation never reads devices.
+- **Persistence.** Best lap saved to a local file in the user config directory; menu reads it. No network.
+- **Audio (stretch).** Engine loop pitch-by-speed and skid cues when Drifting, after driving feels right.
+- **CI.** Replace the retired npm workflows with a cargo pipeline: fmt check, clippy, tests (both seams).
 
 ## Testing Decisions
 
-**What makes a good test here.** External behavior only, never implementation detail: given a seed, the generator returns the same Track; given an input timeline, the simulation returns the same lap time and positions to the bit; a Run that skips a checkpoint is rejected; a submitted Run appears on the Leaderboard in rank order; a Track Code decodes to the Track that encoded it. The determinism contract is the product — the strongest test is "replay any Run twice, observe byte-identical positions."
-
-**Seams (confirmed in session).** One domain seam, two pure functions: the simulation step and the Track generator. Everything above — determinism, Ghost playback, checkpoint validation, the Coast feasibility invariant per generated corner, the drift bench — tests through it, headless and browser-free. The drift bench is a CI job at this seam: scripted driver policies feed inputs; the gate result is the assertion. Second seam: the Leaderboard API contract, tested against a local Worker runtime. Renderer, input, and UX are verified by browser smoke runs, not unit seams.
-
-**Modules under test.** Simulation step; Track generator; Track Code codec; checkpoint validation; drift bench (CI); Leaderboard Worker contract.
-
-**Prior art.** No tests exist yet (greenfield repo). External models: Kart Royale's drift-bench harness for the bench structure (same-driver A/B, null test, advantage gates); javascript-racer's fixed-step accumulator for the simulation loop pattern.
+- **Two seams, agreed with the user:** (1) the headless simulation tick — Track + inputs in, snapshot out; (2) the Track parser — file text in, typed `Track` or error out. Nothing else gets a seam; the Bevy shell is smoke-tested manually.
+- **A good test** drives a seam and asserts only externally observable outcomes (snapshot fields, error variants): scripted input streams produce expected pose/velocity/lap/position/phase transitions; malformed Track text produces a specific error. No assertions on internals, no physics-constant peeking.
+- **Determinism:** fixed 64 Hz step, seeded everything; identical input streams must produce identical snapshot sequences — this is asserted directly, because AI learning and difficulty tuning later depend on replayability.
+- **What gets covered where:** simulation tests — grip/drift behavior (handbrake raises lateral slip), surface effects, wall speed loss, lap counting including cut attempts, race phase transitions, AI progress and corner slowdown, positions; parser tests — unclosed loop, bad width, unknown surface, malformed data.
+- **Prior art:** none in-repo (fresh Rust codebase). Patterns mined for the shape of these tests live in the research notes: the ordered-checkpoint lap counter, the FixedUpdate chained physics step, and the fixed-step determinism-with-hashing example.
 
 ## Out of Scope
 
-- Real-time PvP in any form (ADR-0004).
-- Accounts, auth, profiles, cross-device sync.
-- Track editor or any hand-authored Track (ADR-0003).
-- Gamepad input (appeared in research; never decided — a later additive option).
-- Tilt steering (iOS permission detour; possible later option).
-- Slide rewards / mini-turbo-style boosts (ADR-0006; revisit only if the bench shows fast laps that feel unrewarded).
-- Server-side re-simulation or anti-cheat beyond checkpoint validation (ADR-0005).
-- PWA/service worker (v1 is a plain static page with full features; installability is a later enhancement that must never gate any feature).
-- Multi-tier quality settings (single tier + correct devicePixelRatio handling in v1).
-- Audio.
-- Weekday difficulty ramp for the Daily Challenge (Weekly is one class harder; a Daily ramp may come later through the same class mechanism).
-- Friends-only ghost lists (Track Code sharing covers it).
+- Multiplayer, netcode, any server or leaderboard.
+- WASM/web and mobile builds; native desktop only.
+- Gamepad and remappable controls.
+- Generated Tracks, Track codes/sharing, a Track editor.
+- Learning/optimizing-line AI (v1 AI is waypoint + fixed skill by decision).
+- Rubber-banding.
+- Ghost/Run input-replay recording.
+- Full audio pass (engine/skid cues only as the stretch story).
 
 ## Further Notes
 
-- Full design history: the session record and research live in the repo (`docs/research/racing-game-inspiration.md`, `CONTEXT.md`, `docs/adr/0001`–`0006`).
-- Determinism scope: bit-equality is required per engine, not across engines — each client simulates every Run locally (Ghosts are input replays), and the server never re-simulates. Engine-specific math variance is therefore acceptable.
-- The repo name `topdown-racer` is a historical artifact from before the camera decision (ADR-0001); the product has no name yet.
-- The 30% advantage ceiling, the seed-suite size, and the drift floor are structure commitments; their exact numbers are set the first time the bench runs against real curves.
+- Research that informed the stack and steal-lists: `docs/research/rust-stack-awesome.md`, `docs/research/rust-stack-github.md`, `docs/research/rust-stack-docs.md` (closest prior art: a Bevy + rapier2d top-down racer's drift model, and an engine-free FixedUpdate drift formulation).
+- Engine and physics decision recorded in ADR-0001 (Bevy over macroquad; custom physics over a physics crate).
+- Vocabulary lives in `CONTEXT.md` (Track, Car, Race, AI Opponent, Drift). Retired vocabulary from the deleted TS game — Track Code, Run, Ghost, Leaderboard — is intentionally dead; do not reuse it.
+- Cutover state: the TypeScript-era working-tree deletions, legacy ADR/spec removal, and retirement of the npm/vite/wrangler workflows land together in the cutover commit (story 35); stale specs #1 and #2 are closed with restart notes; CI is rebuilt as the cargo pipeline (story 33).

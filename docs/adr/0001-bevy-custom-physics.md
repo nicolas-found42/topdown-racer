@@ -1,0 +1,7 @@
+# Bevy with custom physics, no physics engine in v1
+
+The fresh-native restart (the TypeScript game was deleted deliberately) needs an engine and a physics posture in its first commit; both are expensive to swap later. We decided on Bevy with hand-rolled 2D car physics stepped in `FixedUpdate` (64 Hz), and against both macroquad and a physics crate (Rapier2D/Avian).
+
+Bevy over macroquad: v1 already needs opponents, race flow, and deterministic fixed-step simulation, and the growth path (learning AI, more Tracks) wants a scheduler and input/audio subsystems; macroquad's single-file loop buys build speed we don't need. Custom physics over a physics engine: the racing feel contract is lateral grip with slip, surfaces, and tuned wall losses — a top-down racer drives kinematic bodies directly, so a rigid-body solver adds determinism and tuning risk while the engine-free formulation stays plain, portable Rust that the headless test seam can drive without Bevy. If wall/shape complexity ever demands it, Avian is the fallback (ECS-native, determinism-tested), which is why no wall code hard-codes assumptions a swap would break.
+
+Considered and rejected: macroquad + accumulator loop (greenfield velocity pick, weaker growth path); Bevy + Rapier2D/Avian from day one (solver power we don't use, heavier determinism story). Research basis: `docs/research/rust-stack-docs.md`, `docs/research/rust-stack-github.md`.

@@ -1,41 +1,25 @@
-# Racing Game
+# Topdown Racer
 
-A pseudo-3D time-attack racing game for the browser (desktop + mobile). Core loop: beat the Daily and Weekly Challenge Tracks, and race any shared seed; Drift is the mastery layer.
+Fresh native Rust top-down racing game. Solo developer v1: you versus AI opponents on a closed circuit.
 
 ## Language
 
 **Track**:
-A playable course generated from a seed. Never hand-authored.
-_Avoid_: level, map, course, circuit
+A closed-loop circuit defined as a data-driven center polyline plus width and surfaces.
+_Avoid_: level, map, course
 
-**Track Code**:
-The shareable encoding of a Track's identity. Identical code → identical Track.
-_Avoid_: seed (the seed is the raw number; the code is the encoding)
+**Car**:
+The player- or AI-driven vehicle simulated as a point mass with heading, longitudinal accel/brake/drag and lateral grip with slip angle.
+_Avoid_: ship, sprite, body
 
-**Run**:
-A single timed attempt on a Track, recorded as inputs that replay bit-identically.
-_Avoid_: attempt, race, replay
+**Race**:
+3 laps, you plus 3 AI cars, with live positions and best lap shown.
+_Avoid_: match, round, heat
 
-**Ghost**:
-A Run replayed as a rival car.
-_Avoid_: rival, replay car
+**AI Opponent**:
+A waypoint-following car with corner slowdown and lateral offset, fixed skill and no rubber-banding for v1.
+_Avoid_: bot, NPC, ghost
 
 **Drift**:
-A controlled slide carried through a corner and traded for speed; the mastery skill separating fast laps from clean ones.
-_Avoid_: slide, skid (a skid is uncontrolled)
-
-**Leaderboard**:
-Per-Track ranking of the best Runs.
-_Avoid_: scoreboard, ladder
-
-**Daily Challenge**:
-The Track derived from the calendar date — identical for every player that day — with its own Leaderboard.
-_Avoid_: track of the day
-
-**Weekly Challenge**:
-The Track derived from the calendar week — identical for every player that week — with its own Leaderboard.
-_Avoid_: track of the week
-
-**Generate and Share**:
-Player-facing Track creation: roll a fresh seed into a Track, drive any Track Code, share codes. No editor — only seeds.
-_Avoid_: editor, sandbox, custom tracks
+Controlled lateral slip from the grip model, distinct from uncontrolled wall-slide.
+_Avoid_: skid, slide, powerslide
