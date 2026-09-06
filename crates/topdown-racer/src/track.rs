@@ -137,6 +137,10 @@ impl Track {
             return Err(TrackParseError::InvalidWidth(src.width));
         }
 
+        if src.points.is_empty() {
+            return Err(TrackParseError::TooFewPoints(0));
+        }
+
         let first = src.points.first().copied().unwrap_or([0.0; 2]);
         let last = src.points.last().copied().unwrap_or([0.0; 2]);
         let gap = Vec2::new(first[0] - last[0], first[1] - last[1]).length();
@@ -183,7 +187,11 @@ impl Track {
             }
         }
 
-        let points = src.points.iter().map(|p| Vec2::new(p[0], p[1])).collect();
+        let mut points: Vec<Vec2> = src.points.iter().map(|p| Vec2::new(p[0], p[1])).collect();
+        // The tolerant closure check passed; canonicalize the closing vertex
+        // so the documented last-equals-first invariant holds exactly.
+        let closing = points[0];
+        *points.last_mut().unwrap() = closing;
 
         Ok(Track {
             name: src.name,
@@ -262,6 +270,15 @@ mod tests {
             let msg = err.to_string();
             assert!(msg.contains("distinct points"), "message: {msg}");
         }
+    }
+
+    #[test]
+    fn near_closed_loop_canonicalizes_the_closing_point() {
+        // Within CLOSURE_TOLERANCE, so it parses — and the parsed Track then
+        // satisfies last point == first point exactly.
+        let text = track_text("[[0,0],[10,0],[10,10],[0.00005,0]]", "10", "[]");
+        let track = Track::parse(&text).unwrap();
+        assert_eq!(track.points.last(), Some(&track.points[0]));
     }
 
     #[test]
