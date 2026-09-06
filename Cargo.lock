@@ -3698,6 +3698,9 @@ name = "topdown-racer"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "glam",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
