@@ -482,12 +482,13 @@ fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, boo
     (post_surface, wall_contact, drifting)
 }
 
+/// Grid slot spacing in world units. Must clear the car's visual length (~4.4
+/// nose to tail) so staged cars never render bumper-to-bumper at the start.
+const CAR_SPACING: f32 = 5.0;
 /// Unit vector along a heading (0 faces +x, positive is counter-clockwise).
 fn forward(heading: f32) -> Vec2 {
     Vec2::new(heading.cos(), heading.sin())
 }
-
-const CAR_SPACING: f32 = 4.0;
 
 /// Engine acceleration at full throttle, in world units per second squared.
 const ENGINE_ACCEL: f32 = 24.0;
