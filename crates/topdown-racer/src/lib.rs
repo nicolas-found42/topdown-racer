@@ -429,11 +429,10 @@ pub fn format_hud_data(player_snap: &CarSnapshot, total_cars: usize) -> HudData 
     let lap = format!("LAP {}/{}", current_lap, TOTAL_LAPS);
 
     let pos_suffix = match player_snap.position {
-        1 => "1st",
-        2 => "2nd",
-        3 => "3rd",
-        4 => "4th",
-        _ => "th",
+        1 => "1st".to_owned(),
+        2 => "2nd".to_owned(),
+        3 => "3rd".to_owned(),
+        n => format!("{n}th"),
     };
     let position = format!("POS {}/{}", pos_suffix, total_cars);
 
@@ -760,24 +759,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hud_shows_lap_position_time_best_and_speed_formatted_from_snapshot() {
+    fn sample_snapshot() -> CarSnapshot {
         use topdown_racer_core::simulation::RacePhase;
-        let snap = CarSnapshot {
+        CarSnapshot {
             pose: Vec2::ZERO,
             heading: 0.0,
-            velocity: Vec2::new(24.2, 0.0),
-            forward_speed: 24.2,
+            velocity: Vec2::ZERO,
+            forward_speed: 0.0,
             surface: Surface::Road,
             wall_contact: false,
             drifting: false,
             phase: RacePhase::Racing,
-            completed_laps: 1, // Currently on lap 2
-            lap_times: [Some(18.45), None, None],
-            current_lap_time: 12.34,
-            best_lap_time: Some(18.45),
+            completed_laps: 0,
+            lap_times: [None; 3],
+            current_lap_time: 0.0,
+            best_lap_time: None,
             position: 1,
-        };
+        }
+    }
+
+    #[test]
+    fn hud_shows_lap_position_time_best_and_speed_formatted_from_snapshot() {
+        let mut snap = sample_snapshot();
+        snap.velocity = Vec2::new(24.2, 0.0);
+        snap.forward_speed = 24.2;
+        snap.completed_laps = 1;
+        snap.lap_times = [Some(18.45), None, None];
+        snap.current_lap_time = 12.34;
+        snap.best_lap_time = Some(18.45);
 
         let hud = format_hud_data(&snap, 4);
         assert_eq!(hud.lap, "LAP 2/3");
@@ -819,22 +828,8 @@ mod tests {
 
     #[test]
     fn hud_values_track_snapshot_exactly_without_local_shell_logic() {
-        use topdown_racer_core::simulation::RacePhase;
-        let mut snap = CarSnapshot {
-            pose: Vec2::ZERO,
-            heading: 0.0,
-            velocity: Vec2::ZERO,
-            forward_speed: 0.0,
-            surface: Surface::Road,
-            wall_contact: false,
-            drifting: false,
-            phase: RacePhase::Racing,
-            completed_laps: 0,
-            lap_times: [None; 3],
-            current_lap_time: 0.0,
-            best_lap_time: None,
-            position: 3,
-        };
+        let mut snap = sample_snapshot();
+        snap.position = 3;
 
         let hud_initial = format_hud_data(&snap, 4);
         assert_eq!(hud_initial.lap, "LAP 1/3");
