@@ -3,7 +3,9 @@
 use bevy::{prelude::*, render::camera::Viewport, window::PrimaryWindow};
 use glam::Vec2;
 use topdown_racer_core::{
-    simulation::{CarInput, CarSnapshot, Sim, FIXED_HZ},
+    simulation::{
+        CarInput, CarSnapshot, RacePhase, Sim, DEFAULT_COUNTDOWN_TICKS, FIXED_DT, FIXED_HZ,
+    },
     track::{Surface, Track, SAMPLE_CIRCUIT},
 };
 
@@ -104,18 +106,56 @@ pub struct ShellSimulation {
     pub sim: Sim,
     pub prev_snapshots: Vec<CarSnapshot>,
     pub curr_snapshots: Vec<CarSnapshot>,
+    /// Fixed ticks elapsed since the race phase began (green), for overlay timing.
+    pub racing_ticks: u32,
 }
 
 impl ShellSimulation {
     pub fn new(track: Track) -> Self {
-        let mut sim = Sim::new(track, TOTAL_RACE_CARS);
-        sim.enable_ai_opponents();
+        Self::from_sim(Sim::new_race(track, TOTAL_RACE_CARS))
+    }
+
+    fn from_sim(mut sim: Sim) -> Self {
         let initial = sim.tick(&[CarInput::default()]);
         Self {
             sim,
             prev_snapshots: initial.clone(),
             curr_snapshots: initial,
+            racing_ticks: 0,
         }
+    }
+
+    /// Rebuilds a fresh race starting from the countdown phase.
+    pub fn reset_to_fresh_race(&mut self) {
+        let track = self.sim.track().clone();
+        *self = Self::from_sim(Sim::new_race(track, TOTAL_RACE_CARS));
+    }
+}
+
+/// Shell-level screen state: menu versus an active race.
+#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AppState {
+    #[default]
+    Menu,
+    Race,
+}
+
+/// Maps a race phase to the countdown overlay text shown on screen.
+pub fn countdown_display(phase: RacePhase) -> &'static str {
+    match phase {
+        RacePhase::Countdown { ticks_remaining } => {
+            let elapsed = DEFAULT_COUNTDOWN_TICKS.saturating_sub(ticks_remaining);
+            let third = DEFAULT_COUNTDOWN_TICKS / 3;
+            if elapsed < third {
+                "3"
+            } else if elapsed < third * 2 {
+                "2"
+            } else {
+                "1"
+            }
+        }
+        RacePhase::Racing => "GO!",
+        RacePhase::Finished => "",
     }
 }
 
@@ -125,19 +165,35 @@ pub struct RacerGamePlugin;
 impl Plugin for RacerGamePlugin {
     fn build(&self, app: &mut App) {
         let track = Track::parse(SAMPLE_CIRCUIT).expect("sample circuit must parse");
-        app.insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
+        app.init_state::<AppState>()
+            .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
             .insert_resource(ShellSimulation::new(track))
             .init_resource::<PlayerInput>()
             .add_systems(Startup, (setup_camera, setup_track, setup_car, setup_hud))
-            .add_systems(PreUpdate, read_keyboard_input)
-            .add_systems(FixedUpdate, step_simulation)
+            .add_systems(OnEnter(AppState::Menu), (spawn_menu_ui, hide_hud))
+            .add_systems(OnExit(AppState::Menu), despawn_menu_ui)
+            .add_systems(OnEnter(AppState::Race), (reset_race_on_enter, show_hud))
+            .add_systems(Update, menu_action_system.run_if(in_state(AppState::Menu)))
+            .add_systems(Update, esc_to_menu_system.run_if(in_state(AppState::Race)))
+            .add_systems(
+                PreUpdate,
+                read_keyboard_input.run_if(in_state(AppState::Race)),
+            )
+            .add_systems(
+                FixedUpdate,
+                step_simulation.run_if(in_state(AppState::Race)),
+            )
             .add_systems(
                 Update,
-                (update_letterbox, interpolate_car_and_camera, update_hud),
+                (
+                    update_letterbox,
+                    interpolate_car_and_camera.run_if(in_state(AppState::Race)),
+                    update_hud.run_if(in_state(AppState::Race)),
+                    update_countdown_overlay.run_if(in_state(AppState::Race)),
+                ),
             );
     }
 }
-
 fn setup_camera(mut commands: Commands) {
     let mut camera = Camera2dBundle::default();
     camera.projection.scale = CAMERA_ZOOM;
@@ -334,7 +390,6 @@ pub fn read_keyboard_input(
     let left = keyboard.any_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]);
     let right = keyboard.any_pressed([KeyCode::ArrowRight, KeyCode::KeyD]);
     let handbrake = keyboard.pressed(KeyCode::Space);
-
     player_input.0 = map_keyboard_input(up, down, left, right, handbrake);
 }
 
@@ -344,6 +399,9 @@ fn step_simulation(mut shell: ResMut<ShellSimulation>, player_input: Res<PlayerI
 
     let snaps = shell.sim.tick(&[player_input.0]);
     shell.curr_snapshots = snaps;
+    if shell.sim.phase() == RacePhase::Racing {
+        shell.racing_ticks += 1;
+    }
 }
 /// Updates camera viewport letterboxing when the window size changes.
 fn update_letterbox(
@@ -472,18 +530,22 @@ fn setup_hud(mut commands: Commands) {
     };
 
     commands
-        .spawn(NodeBundle {
-            style: Style {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                position_type: PositionType::Absolute,
-                justify_content: JustifyContent::SpaceBetween,
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(Val::Px(16.0)),
+        .spawn((
+            NodeBundle {
+                style: Style {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    position_type: PositionType::Absolute,
+                    justify_content: JustifyContent::SpaceBetween,
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(Val::Px(16.0)),
+                    ..default()
+                },
+                visibility: Visibility::Hidden,
                 ..default()
             },
-            ..default()
-        })
+            HudRoot,
+        ))
         .with_children(|root| {
             // Top bar
             root.spawn(NodeBundle {
@@ -553,6 +615,29 @@ fn setup_hud(mut commands: Commands) {
                 ));
             });
         });
+
+    // Centered countdown overlay shown during the countdown phase.
+    commands.spawn((
+        TextBundle {
+            text: Text::from_section(
+                "3",
+                TextStyle {
+                    font_size: 96.0,
+                    color: Color::WHITE,
+                    ..default()
+                },
+            ),
+            style: Style {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(40.0),
+                ..default()
+            },
+            visibility: Visibility::Hidden,
+            ..default()
+        },
+        CountdownText,
+    ));
 }
 
 fn update_hud(shell: Res<ShellSimulation>, mut hud_query: Query<(&HudElement, &mut Text)>) {
@@ -569,6 +654,155 @@ fn update_hud(shell: Res<ShellSimulation>, mut hud_query: Query<(&HudElement, &m
             HudElement::BestTime => text.sections[0].value = hud.best_lap_time.clone(),
             HudElement::Speed => text.sections[0].value = hud.speed.clone(),
         }
+    }
+}
+
+/// Marker for the HUD root node so it can hide behind the menu.
+#[derive(Component)]
+pub struct HudRoot;
+
+/// Marker for the countdown overlay text shown during the countdown phase.
+#[derive(Component)]
+pub struct CountdownText;
+
+/// Marker for the menu screen root entity.
+#[derive(Component)]
+pub struct MenuUi;
+
+/// Marker for the menu start button.
+#[derive(Component)]
+pub struct StartButton;
+
+/// Rebuilds a fresh countdown race whenever entering the Race state.
+pub fn reset_race_on_enter(mut shell: ResMut<ShellSimulation>) {
+    shell.reset_to_fresh_race();
+}
+
+/// Hides the HUD and countdown overlay while the menu is shown.
+pub fn hide_hud(
+    mut hud_q: Query<&mut Visibility, With<HudRoot>>,
+    mut countdown_q: Query<&mut Visibility, (With<CountdownText>, Without<HudRoot>)>,
+) {
+    for mut vis in hud_q.iter_mut() {
+        *vis = Visibility::Hidden;
+    }
+    for mut vis in countdown_q.iter_mut() {
+        *vis = Visibility::Hidden;
+    }
+}
+
+/// Shows the HUD and countdown overlay when a race starts.
+pub fn show_hud(
+    mut hud_q: Query<&mut Visibility, With<HudRoot>>,
+    mut countdown_q: Query<&mut Visibility, (With<CountdownText>, Without<HudRoot>)>,
+) {
+    for mut vis in hud_q.iter_mut() {
+        *vis = Visibility::Visible;
+    }
+    for mut vis in countdown_q.iter_mut() {
+        *vis = Visibility::Visible;
+    }
+}
+
+/// Spawns the menu screen with a start option.
+pub fn spawn_menu_ui(mut commands: Commands) {
+    commands
+        .spawn((
+            NodeBundle {
+                style: Style {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    position_type: PositionType::Absolute,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(16.0),
+                    ..default()
+                },
+                background_color: BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.92)),
+                ..default()
+            },
+            MenuUi,
+        ))
+        .with_children(|menu| {
+            menu.spawn(TextBundle::from_section(
+                "TOPDOWN RACER",
+                TextStyle {
+                    font_size: 48.0,
+                    color: Color::WHITE,
+                    ..default()
+                },
+            ));
+            menu.spawn((
+                ButtonBundle {
+                    style: Style {
+                        padding: UiRect::axes(Val::Px(32.0), Val::Px(12.0)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    background_color: BackgroundColor(Color::srgb(0.2, 0.55, 0.25)),
+                    ..default()
+                },
+                StartButton,
+            ))
+            .with_children(|button| {
+                button.spawn(TextBundle::from_section(
+                    "START RACE (Enter)",
+                    TextStyle {
+                        font_size: 24.0,
+                        color: Color::WHITE,
+                        ..default()
+                    },
+                ));
+            });
+        });
+}
+
+/// Despawns the menu screen when leaving the menu.
+pub fn despawn_menu_ui(mut commands: Commands, menu_q: Query<Entity, With<MenuUi>>) {
+    for entity in menu_q.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+/// Starts the race from the menu via the button or the Enter key.
+pub fn menu_action_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    button_q: Query<&Interaction, (Changed<Interaction>, With<StartButton>)>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    let button_clicked = button_q
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed);
+    if button_clicked || keyboard.just_pressed(KeyCode::Enter) {
+        next_state.set(AppState::Race);
+    }
+}
+
+/// Returns cleanly to the menu when ESC is pressed during a race.
+pub fn esc_to_menu_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    if keyboard.just_pressed(KeyCode::Escape) {
+        next_state.set(AppState::Menu);
+    }
+}
+
+/// Updates the countdown overlay text from the simulation phase.
+pub fn update_countdown_overlay(
+    shell: Res<ShellSimulation>,
+    mut countdown_q: Query<&mut Text, With<CountdownText>>,
+) {
+    let text = match shell.sim.phase() {
+        // Clear the green flash once the race is underway (time since green,
+        // not the per-lap timer which resets at every lap line).
+        RacePhase::Racing if shell.racing_ticks as f32 * FIXED_DT > 2.0 => "",
+        phase => countdown_display(phase),
+    };
+    for mut t in countdown_q.iter_mut() {
+        t.sections[0].value = text.to_owned();
     }
 }
 
@@ -850,5 +1084,125 @@ mod tests {
         assert_eq!(hud_updated.current_lap_time, "TIME 01:05.25");
         assert_eq!(hud_updated.best_lap_time, "BEST 01:01.80");
         assert_eq!(hud_updated.speed, "SPEED 32");
+    }
+
+    #[test]
+    fn menu_start_leads_into_countdown_and_control_unlocks_at_green() {
+        use topdown_racer_core::simulation::{RacePhase, DEFAULT_COUNTDOWN_TICKS};
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new_race(track, 4);
+
+        // Menu start produces a countdown with locked controls.
+        assert_eq!(
+            sim.phase(),
+            RacePhase::Countdown {
+                ticks_remaining: DEFAULT_COUNTDOWN_TICKS
+            }
+        );
+        for _ in 0..DEFAULT_COUNTDOWN_TICKS - 1 {
+            let snap = sim.tick(&[CarInput {
+                throttle: 1.0,
+                ..CarInput::default()
+            }])[0];
+            assert_eq!(
+                snap.forward_speed, 0.0,
+                "controls must stay locked during countdown"
+            );
+        }
+
+        // Green: racing phase, throttle now moves the car.
+        let snap = sim.tick(&[CarInput {
+            throttle: 1.0,
+            ..CarInput::default()
+        }])[0];
+        assert_eq!(snap.phase, RacePhase::Racing);
+        let snap2 = sim.tick(&[CarInput {
+            throttle: 1.0,
+            ..CarInput::default()
+        }])[0];
+        assert!(
+            snap2.forward_speed > 0.0,
+            "control must unlock when the countdown ends"
+        );
+    }
+
+    #[test]
+    fn reset_races_replay_identically_across_restarts() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut shell_a = ShellSimulation::new(track.clone());
+        let shell_b = ShellSimulation::new(track);
+
+        // Drive shell_a deep into the race, then restart it mid-race.
+        for _ in 0..500 {
+            shell_a.sim.tick(&[CarInput {
+                throttle: 1.0,
+                ..CarInput::default()
+            }]);
+        }
+        shell_a.reset_to_fresh_race();
+
+        // The restarted race must replay identically to a fresh race.
+        let mut shell_b = shell_b;
+        for _ in 0..300 {
+            let snaps_a = shell_a.sim.tick(&[CarInput::default()]);
+            let snaps_b = shell_b.sim.tick(&[CarInput::default()]);
+            assert_eq!(snaps_a, snaps_b, "restarted races must replay identically");
+        }
+    }
+
+    #[test]
+    fn esc_to_menu_and_restart_runs_a_fresh_countdown() {
+        use topdown_racer_core::simulation::{RacePhase, DEFAULT_COUNTDOWN_TICKS};
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut shell = ShellSimulation::new(track);
+
+        // Drive the race forward past the countdown.
+        for _ in 0..DEFAULT_COUNTDOWN_TICKS + 100 {
+            shell.sim.tick(&[CarInput {
+                throttle: 1.0,
+                ..CarInput::default()
+            }]);
+        }
+        shell.curr_snapshots = shell.sim.tick(&[CarInput::default()]);
+        assert_eq!(shell.curr_snapshots[0].phase, RacePhase::Racing);
+
+        // ESC returns to the menu; starting again rebuilds a fresh countdown race.
+        shell.reset_to_fresh_race();
+        assert_eq!(
+            shell.sim.phase(),
+            RacePhase::Countdown {
+                ticks_remaining: DEFAULT_COUNTDOWN_TICKS - 1
+            }
+        );
+        assert_eq!(shell.curr_snapshots[0].completed_laps, 0);
+        assert_eq!(shell.curr_snapshots[0].forward_speed, 0.0);
+    }
+
+    #[test]
+    fn countdown_display_shows_three_two_one_then_go() {
+        use topdown_racer_core::simulation::{RacePhase, DEFAULT_COUNTDOWN_TICKS};
+        assert_eq!(
+            countdown_display(RacePhase::Countdown {
+                ticks_remaining: DEFAULT_COUNTDOWN_TICKS
+            }),
+            "3"
+        );
+        assert_eq!(
+            countdown_display(RacePhase::Countdown {
+                ticks_remaining: DEFAULT_COUNTDOWN_TICKS * 2 / 3 + 1
+            }),
+            "3"
+        );
+        assert_eq!(
+            countdown_display(RacePhase::Countdown {
+                ticks_remaining: DEFAULT_COUNTDOWN_TICKS / 2
+            }),
+            "2"
+        );
+        assert_eq!(
+            countdown_display(RacePhase::Countdown { ticks_remaining: 1 }),
+            "1"
+        );
+        assert_eq!(countdown_display(RacePhase::Racing), "GO!");
     }
 }
