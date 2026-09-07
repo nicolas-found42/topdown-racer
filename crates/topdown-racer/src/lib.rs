@@ -99,7 +99,6 @@ pub struct ShellSimulation {
     pub sim: Sim,
     pub prev_snapshot: CarSnapshot,
     pub curr_snapshot: CarSnapshot,
-    pub tick_count: u64,
 }
 
 impl ShellSimulation {
@@ -110,7 +109,6 @@ impl ShellSimulation {
             sim,
             prev_snapshot: initial,
             curr_snapshot: initial,
-            tick_count: 0,
         }
     }
 }
@@ -318,10 +316,10 @@ pub fn read_keyboard_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut player_input: ResMut<PlayerInput>,
 ) {
-    let up = keyboard.pressed(KeyCode::ArrowUp) || keyboard.pressed(KeyCode::KeyW);
-    let down = keyboard.pressed(KeyCode::ArrowDown) || keyboard.pressed(KeyCode::KeyS);
-    let left = keyboard.pressed(KeyCode::ArrowLeft) || keyboard.pressed(KeyCode::KeyA);
-    let right = keyboard.pressed(KeyCode::ArrowRight) || keyboard.pressed(KeyCode::KeyD);
+    let up = keyboard.any_pressed([KeyCode::ArrowUp, KeyCode::KeyW]);
+    let down = keyboard.any_pressed([KeyCode::ArrowDown, KeyCode::KeyS]);
+    let left = keyboard.any_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]);
+    let right = keyboard.any_pressed([KeyCode::ArrowRight, KeyCode::KeyD]);
     let handbrake = keyboard.pressed(KeyCode::Space);
 
     player_input.0 = map_keyboard_input(up, down, left, right, handbrake);
