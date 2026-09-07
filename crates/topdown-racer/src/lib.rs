@@ -3,7 +3,9 @@
 use bevy::{prelude::*, render::camera::Viewport, window::PrimaryWindow};
 use glam::Vec2;
 use topdown_racer_core::{
-    simulation::{CarInput, CarSnapshot, RacePhase, Sim, DEFAULT_COUNTDOWN_TICKS, FIXED_HZ},
+    simulation::{
+        CarInput, CarSnapshot, RacePhase, Sim, DEFAULT_COUNTDOWN_TICKS, FIXED_DT, FIXED_HZ,
+    },
     track::{Surface, Track, SAMPLE_CIRCUIT},
 };
 
@@ -104,6 +106,8 @@ pub struct ShellSimulation {
     pub sim: Sim,
     pub prev_snapshots: Vec<CarSnapshot>,
     pub curr_snapshots: Vec<CarSnapshot>,
+    /// Fixed ticks elapsed since the race phase began (green), for overlay timing.
+    pub racing_ticks: u32,
 }
 
 impl ShellSimulation {
@@ -117,6 +121,7 @@ impl ShellSimulation {
             sim,
             prev_snapshots: initial.clone(),
             curr_snapshots: initial,
+            racing_ticks: 0,
         }
     }
 
@@ -385,7 +390,6 @@ pub fn read_keyboard_input(
     let left = keyboard.any_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]);
     let right = keyboard.any_pressed([KeyCode::ArrowRight, KeyCode::KeyD]);
     let handbrake = keyboard.pressed(KeyCode::Space);
-
     player_input.0 = map_keyboard_input(up, down, left, right, handbrake);
 }
 
@@ -395,6 +399,9 @@ fn step_simulation(mut shell: ResMut<ShellSimulation>, player_input: Res<PlayerI
 
     let snaps = shell.sim.tick(&[player_input.0]);
     shell.curr_snapshots = snaps;
+    if shell.sim.phase() == RacePhase::Racing {
+        shell.racing_ticks += 1;
+    }
 }
 /// Updates camera viewport letterboxing when the window size changes.
 fn update_letterbox(
@@ -534,6 +541,7 @@ fn setup_hud(mut commands: Commands) {
                     padding: UiRect::all(Val::Px(16.0)),
                     ..default()
                 },
+                visibility: Visibility::Hidden,
                 ..default()
             },
             HudRoot,
@@ -625,6 +633,7 @@ fn setup_hud(mut commands: Commands) {
                 top: Val::Percent(40.0),
                 ..default()
             },
+            visibility: Visibility::Hidden,
             ..default()
         },
         CountdownText,
@@ -787,15 +796,9 @@ pub fn update_countdown_overlay(
     mut countdown_q: Query<&mut Text, With<CountdownText>>,
 ) {
     let text = match shell.sim.phase() {
-        // Clear the green flash once the race is underway.
-        RacePhase::Racing
-            if shell
-                .curr_snapshots
-                .first()
-                .is_some_and(|snap| snap.current_lap_time > 2.0) =>
-        {
-            ""
-        }
+        // Clear the green flash once the race is underway (time since green,
+        // not the per-lap timer which resets at every lap line).
+        RacePhase::Racing if shell.racing_ticks as f32 * FIXED_DT > 2.0 => "",
         phase => countdown_display(phase),
     };
     for mut t in countdown_q.iter_mut() {
