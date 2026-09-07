@@ -200,6 +200,25 @@ impl Track {
             surfaces,
         })
     }
+
+    /// Returns a world point `distance` units back along the polyline from
+    /// the start line (the first vertex), following the closed loop backwards.
+    pub fn spawn_pose(&self, distance: f32) -> Vec2 {
+        let segments = self.points.len() - 1;
+        let mut seg = segments - 1; // segment ending at the start line
+        let mut remaining = distance;
+        loop {
+            let a = self.points[seg];
+            let b = self.points[(seg + 1) % self.points.len()];
+            let len = a.distance(b);
+            if remaining <= len {
+                let dir = (b - a) / len;
+                return b - dir * remaining;
+            }
+            remaining -= len;
+            seg = (seg + segments - 1) % segments;
+        }
+    }
 }
 
 #[cfg(test)]

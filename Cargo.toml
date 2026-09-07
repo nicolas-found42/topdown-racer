@@ -1,4 +1,4 @@
 [workspace]
-members = ["crates/topdown-racer"]
-default-members = ["crates/topdown-racer"]
+members = ["crates/topdown-racer", "crates/core"]
+default-members = ["crates/topdown-racer", "crates/core"]
 resolver = "2"

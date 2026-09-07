@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-pub mod track;
+pub use topdown_racer_core::track;
 
 const GAME_TITLE: &str = "Topdown Racer";
 
@@ -27,7 +27,7 @@ mod tests {
 
     const SAMPLE_TRACK_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/data/tracks/sample-circuit.json"
+        "/../core/data/tracks/sample-circuit.json"
     );
 
     /// The sample circuit ships as a real data file next to the crate, not

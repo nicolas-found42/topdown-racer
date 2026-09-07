@@ -3701,6 +3701,16 @@ dependencies = [
  "glam",
  "serde",
  "serde_json",
+ "topdown-racer-core",
+]
+
+[[package]]
+name = "topdown-racer-core"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
