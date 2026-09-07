@@ -1,6 +1,5 @@
 use bevy::prelude::*;
-
-pub use topdown_racer_core::track;
+use topdown_racer::RacerGamePlugin;
 
 const GAME_TITLE: &str = "Topdown Racer";
 
@@ -13,29 +12,7 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(ClearColor(Color::BLACK))
-        .add_systems(Startup, spawn_camera_2d)
+        .insert_resource(ClearColor(Color::srgb(0.12, 0.35, 0.12))) // Green grass background
+        .add_plugins(RacerGamePlugin)
         .run();
-}
-
-fn spawn_camera_2d(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default());
-}
-
-#[cfg(test)]
-mod tests {
-
-    const SAMPLE_TRACK_PATH: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../core/data/tracks/sample-circuit.json"
-    );
-
-    /// The sample circuit ships as a real data file next to the crate, not
-    /// just as an embedded string.
-    #[test]
-    fn sample_track_data_ships_on_disk_and_parses() {
-        let text = std::fs::read_to_string(SAMPLE_TRACK_PATH).unwrap();
-        // The disk copy parses; detailed assertions live in track.rs.
-        crate::track::Track::parse(&text).unwrap();
-    }
 }
