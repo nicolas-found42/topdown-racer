@@ -172,10 +172,10 @@ impl Plugin for RacerGamePlugin {
             .init_resource::<PlayerInput>()
             .add_systems(Startup, (setup_camera, setup_track, setup_car, setup_hud))
             .add_systems(OnEnter(AppState::Menu), (spawn_menu_ui, hide_hud))
-            .add_systems(OnExit(AppState::Menu), despawn_menu_ui)
+            .add_systems(OnExit(AppState::Menu), despawn_screens)
             .add_systems(OnEnter(AppState::Race), (reset_race_on_enter, show_hud))
             .add_systems(OnEnter(AppState::Results), (spawn_results_ui, hide_hud))
-            .add_systems(OnExit(AppState::Results), despawn_results_ui)
+            .add_systems(OnExit(AppState::Results), despawn_screens)
             .add_systems(Update, menu_action_system.run_if(in_state(AppState::Menu)))
             .add_systems(Update, esc_to_menu_system.run_if(in_state(AppState::Race)))
             .add_systems(
@@ -494,20 +494,11 @@ pub fn format_hud_data(player_snap: &CarSnapshot, total_cars: usize) -> HudData 
     let current_lap = (player_snap.completed_laps + 1).min(TOTAL_LAPS);
     let lap = format!("LAP {}/{}", current_lap, TOTAL_LAPS);
 
-    let pos_suffix = match player_snap.position {
-        1 => "1st".to_owned(),
-        2 => "2nd".to_owned(),
-        3 => "3rd".to_owned(),
-        n => format!("{n}th"),
-    };
-    let position = format!("POS {}/{}", pos_suffix, total_cars);
+    let position = format!("POS {}/{}", ordinal(player_snap.position), total_cars);
 
     let current_lap_time = format!("TIME {}", format_time(player_snap.current_lap_time));
 
-    let best_lap_time = match player_snap.best_lap_time {
-        Some(best) => format!("BEST {}", format_time(best)),
-        None => "BEST --:--.--".to_owned(),
-    };
+    let best_lap_time = format!("BEST {}", format_opt_lap_time(player_snap.best_lap_time));
 
     let speed_val = (player_snap.forward_speed.max(0.0).round()) as u32;
     let speed = format!("SPEED {}", speed_val);
@@ -712,26 +703,40 @@ pub fn show_hud(
     }
 }
 
+fn spawn_overlay_root<'a>(
+    commands: &'a mut Commands,
+    row_gap: f32,
+    alpha: f32,
+) -> bevy::ecs::system::EntityCommands<'a> {
+    commands.spawn(NodeBundle {
+        style: Style {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            position_type: PositionType::Absolute,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(row_gap),
+            ..default()
+        },
+        background_color: BackgroundColor(Color::srgba(0.05, 0.05, 0.08, alpha)),
+        ..default()
+    })
+}
+/// Query matching menu and results screen roots.
+type ScreensQuery<'w, 's> = Query<'w, 's, Entity, Or<(With<MenuUi>, With<ResultsUi>)>>;
+
+/// Despawns menu and results screens when leaving them.
+pub fn despawn_screens(mut commands: Commands, screens_q: ScreensQuery) {
+    for entity in screens_q.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
 /// Spawns the menu screen with a start option.
 pub fn spawn_menu_ui(mut commands: Commands) {
-    commands
-        .spawn((
-            NodeBundle {
-                style: Style {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                background_color: BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.92)),
-                ..default()
-            },
-            MenuUi,
-        ))
+    spawn_overlay_root(&mut commands, 16.0, 0.92)
+        .insert(MenuUi)
         .with_children(|menu| {
             menu.spawn(TextBundle::from_section(
                 "TOPDOWN RACER",
@@ -765,13 +770,6 @@ pub fn spawn_menu_ui(mut commands: Commands) {
                 ));
             });
         });
-}
-
-/// Despawns the menu screen when leaving the menu.
-pub fn despawn_menu_ui(mut commands: Commands, menu_q: Query<Entity, With<MenuUi>>) {
-    for entity in menu_q.iter() {
-        commands.entity(entity).despawn_recursive();
-    }
 }
 
 /// Starts the race from the menu via the button or the Enter key.
@@ -835,27 +833,29 @@ pub fn format_results(snaps: &[CarSnapshot]) -> Vec<ResultRow> {
     ordered.sort_by_key(|(_, snap)| snap.position);
     ordered
         .into_iter()
-        .map(|(i, snap)| {
+        .map(|(car_index, snap)| {
             let lap_times = snap
                 .lap_times
                 .iter()
-                .map(|t| match t {
-                    Some(secs) => format_time(*secs),
-                    None => "--:--.--".to_owned(),
-                })
+                .map(|t| format_opt_lap_time(*t))
                 .collect();
-            let best_lap = match snap.best_lap_time {
-                Some(best) => format_time(best),
-                None => "--:--.--".to_owned(),
-            };
+            let best_lap = format_opt_lap_time(snap.best_lap_time);
             ResultRow {
                 position: snap.position,
-                car_number: i + 1,
+                car_number: car_index + 1,
                 lap_times,
                 best_lap,
             }
         })
         .collect()
+}
+
+/// Formats an optional lap time, showing a placeholder when no lap is recorded.
+pub fn format_opt_lap_time(seconds: Option<f32>) -> String {
+    match seconds {
+        Some(secs) => format_time(secs),
+        None => "--:--.--".to_owned(),
+    }
 }
 
 /// Marker for the results screen root entity.
@@ -875,24 +875,8 @@ pub fn detect_race_finish(
 /// Spawns the results screen from simulation snapshots.
 pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
     let rows = format_results(&shell.curr_snapshots);
-    commands
-        .spawn((
-            NodeBundle {
-                style: Style {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(8.0),
-                    ..default()
-                },
-                background_color: BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.94)),
-                ..default()
-            },
-            ResultsUi,
-        ))
+    spawn_overlay_root(&mut commands, 8.0, 0.94)
+        .insert(ResultsUi)
         .with_children(|results| {
             results.spawn(TextBundle::from_section(
                 "RACE FINISHED",
@@ -928,13 +912,6 @@ pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
                 },
             ));
         });
-}
-
-/// Despawns the results screen when leaving it.
-pub fn despawn_results_ui(mut commands: Commands, results_q: Query<Entity, With<ResultsUi>>) {
-    for entity in results_q.iter() {
-        commands.entity(entity).despawn_recursive();
-    }
 }
 
 /// Instant-restarts a fresh race (R / Enter) or returns to the menu (ESC).
@@ -1416,16 +1393,7 @@ mod tests {
             let target = waypoints[current_wp];
             let to_target = target - last_pose;
             let target_angle = to_target.y.atan2(to_target.x);
-            let angle_diff = {
-                let mut d = target_angle - last_heading;
-                while d > std::f32::consts::PI {
-                    d -= 2.0 * std::f32::consts::PI;
-                }
-                while d < -std::f32::consts::PI {
-                    d += 2.0 * std::f32::consts::PI;
-                }
-                d
-            };
+            let angle_diff = wrap_angle(target_angle - last_heading);
             let snap = sim.tick(&[CarInput {
                 throttle: if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 },
                 brake: 0.0,
