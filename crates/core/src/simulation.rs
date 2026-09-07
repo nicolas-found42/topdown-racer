@@ -22,6 +22,8 @@ pub struct CarInput {
     pub brake: f32,
     /// Steering demand, -1..1. Positive steers left (counter-clockwise).
     pub steer: f32,
+    /// Handbrake demand: cuts rear/lateral grip to provoke Drift.
+    pub handbrake: bool,
 }
 
 impl Default for CarInput {
@@ -30,6 +32,7 @@ impl Default for CarInput {
             throttle: 0.0,
             brake: 0.0,
             steer: 0.0,
+            handbrake: false,
         }
     }
 }
@@ -49,6 +52,8 @@ pub struct CarSnapshot {
     pub surface: Surface,
     /// Whether the Car contacted a boundary wall during this tick.
     pub wall_contact: bool,
+    /// Whether the Car is currently in a controlled Drift state.
+    pub drifting: bool,
 }
 
 /// The headless world: Cars advancing over a Track at the fixed step.
@@ -97,7 +102,7 @@ impl Sim {
             .enumerate()
             .map(|(i, car)| {
                 let input = inputs.get(i).copied().unwrap_or_default();
-                let (surface, wall_contact) = step_car(car, input, &self.track);
+                let (surface, wall_contact, drifting) = step_car(car, input, &self.track);
                 CarSnapshot {
                     pose: car.pose,
                     heading: car.heading,
@@ -105,6 +110,7 @@ impl Sim {
                     forward_speed: car.velocity.dot(forward(car.heading)),
                     surface,
                     wall_contact,
+                    drifting,
                 }
             })
             .collect()
@@ -140,7 +146,7 @@ impl SurfacePhysics {
     }
 }
 
-fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, bool) {
+fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, bool, bool) {
     let initial_surface = track.sample_surface(car.pose);
     let physics = SurfacePhysics::for_surface(initial_surface);
 
@@ -168,11 +174,16 @@ fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, boo
             car.standstill_ticks = 0;
             let drive = input.throttle * ENGINE_ACCEL * physics.traction_factor;
             let brake = input.brake * BRAKE_ACCEL * physics.traction_factor;
+            let handbrake_drag = if input.handbrake {
+                HANDBRAKE_DECEL
+            } else {
+                0.0
+            };
 
-            let accel = drive - drag - brake;
+            let accel = drive - drag - brake - handbrake_drag;
             vf += accel * FIXED_DT;
 
-            if input.brake > 0.0 && vf < 0.0 {
+            if (input.brake > 0.0 || input.handbrake) && vf < 0.0 {
                 vf = 0.0;
             }
         }
@@ -199,14 +210,48 @@ fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, boo
         }
     }
 
-    // Steering: angular velocity scales with forward speed and steering input.
-    let angular_vel =
-        (vf * STEER_SENSITIVITY * input.steer).clamp(-MAX_ANGULAR_VEL, MAX_ANGULAR_VEL);
+    // Steering: angular velocity scales with forward speed, weight transfer, and steering input.
+    // Braking shifts weight to the front wheels, increasing steering bite;
+    // acceleration shifts weight to the rear, causing understeer.
+    let weight_bias = if input.brake > 0.0 {
+        1.0 + input.brake * BRAKE_WEIGHT_TRANSFER
+    } else if input.throttle > 0.0 {
+        1.0 - input.throttle * ACCEL_WEIGHT_TRANSFER
+    } else {
+        1.0
+    };
+    let angular_vel = (vf * STEER_SENSITIVITY * weight_bias * input.steer)
+        .clamp(-MAX_ANGULAR_VEL, MAX_ANGULAR_VEL);
     car.heading += angular_vel * FIXED_DT;
 
-    let fwd = forward(car.heading);
-    let left = Vec2::new(-fwd.y, fwd.x);
-    car.velocity = fwd * vf + left * vl;
+    let fwd_new = forward(car.heading);
+    let left_new = Vec2::new(-fwd_new.y, fwd_new.x);
+
+    // Kinematic slip: inertia carries velocity forward as heading turns.
+    let v_pre = fwd * vf + left * vl;
+    let vf_post = v_pre.dot(fwd_new);
+    let vl_post = v_pre.dot(left_new);
+
+    // Lateral grip: tires resist sideways sliding.
+    // Handbrake dramatically reduces lateral grip to provoke Drift.
+    // Braking unloads the rear wheels, slightly reducing lateral grip.
+    let handbrake_grip_mult = if input.handbrake {
+        HANDBRAKE_LATERAL_GRIP_FACTOR
+    } else {
+        1.0
+    };
+    let rear_unload_mult = if input.brake > 0.0 {
+        1.0 - input.brake * BRAKE_REAR_UNLOAD
+    } else {
+        1.0
+    };
+    let effective_grip =
+        LATERAL_GRIP_RATE * physics.traction_factor * handbrake_grip_mult * rear_unload_mult;
+    let grip_decay = (effective_grip * FIXED_DT).clamp(0.0, 1.0);
+    let vl_damped = vl_post * (1.0 - grip_decay);
+
+    // Update car velocity from forward and damped lateral components.
+    car.velocity = fwd_new * vf_post + left_new * vl_damped;
     car.pose += car.velocity * FIXED_DT;
 
     // Wall collision response: bounce with speed loss and inward reflection.
@@ -226,9 +271,18 @@ fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, boo
         false
     };
 
+    // Drift state: controlled lateral slip from grip model, distinct from wall-slide.
+    let vf_final = car.velocity.dot(fwd_new);
+    let vl_final = car.velocity.dot(left_new);
+    let lateral_slip = vl_final.abs();
+    let drifting = !wall_contact
+        && vf_final.abs() > DRIFT_SPEED_MIN
+        && (lateral_slip > DRIFT_LATERAL_SLIP_MIN
+            || (input.handbrake && lateral_slip > HANDBRAKE_DRIFT_SLIP_MIN));
+
     // Sample surface at post-move pose so CarSnapshot matches the final pose.
     let post_surface = track.sample_surface(car.pose);
-    (post_surface, wall_contact)
+    (post_surface, wall_contact, drifting)
 }
 
 /// Unit vector along a heading (0 faces +x, positive is counter-clockwise).
@@ -262,6 +316,24 @@ const STEER_SENSITIVITY: f32 = 0.15;
 const WALL_RESTITUTION: f32 = 0.4;
 /// Tangential friction coefficient during boundary wall collisions.
 const WALL_FRICTION: f32 = 0.75;
+/// Weight transfer factor increasing front steering bite under braking.
+const BRAKE_WEIGHT_TRANSFER: f32 = 0.45;
+/// Weight transfer factor decreasing front steering bite under acceleration (understeer).
+const ACCEL_WEIGHT_TRANSFER: f32 = 0.08;
+/// Rear axle grip reduction factor under braking.
+const BRAKE_REAR_UNLOAD: f32 = 0.25;
+/// Lateral grip restitution rate damping sideways velocity (1/s).
+const LATERAL_GRIP_RATE: f32 = 24.0;
+/// Lateral grip multiplier when handbrake is engaged (cutting grip).
+const HANDBRAKE_LATERAL_GRIP_FACTOR: f32 = 0.12;
+/// Deceleration applied along heading when handbrake is engaged.
+const HANDBRAKE_DECEL: f32 = 12.0;
+/// Minimum forward speed to be eligible for the Drift state.
+const DRIFT_SPEED_MIN: f32 = 3.0;
+/// Minimum lateral slip speed to enter the Drift state.
+const DRIFT_LATERAL_SLIP_MIN: f32 = 1.2;
+/// Minimum lateral slip speed under handbrake to enter the Drift state.
+const HANDBRAKE_DRIFT_SLIP_MIN: f32 = 0.4;
 
 #[cfg(test)]
 mod tests {
@@ -290,6 +362,7 @@ mod tests {
             throttle,
             brake,
             steer,
+            handbrake: false,
         }
     }
 
@@ -636,7 +709,6 @@ mod tests {
                 prev_snap = Some(snap);
             }
         }
-
         assert!(hit_tick.is_some(), "car must hit the wall");
         let prev = prev_snap.unwrap();
         let contact = contact_snap.unwrap();
@@ -722,6 +794,7 @@ mod tests {
                 throttle,
                 brake,
                 steer,
+                handbrake: false,
             }]);
             let snap = snaps[0];
             last_pose = snap.pose;
@@ -753,5 +826,163 @@ mod tests {
             "final pose must be near start/finish line: got {:?}",
             last.pose
         );
+    }
+
+    #[test]
+    fn handbrake_cornering_shows_higher_lateral_slip_than_plain_cornering() {
+        // Accelerate along straight to reach cornering speed.
+        let straight = straight_track();
+        let mut sim_plain = Sim::new(straight.clone(), 1);
+        let mut sim_handbrake = Sim::new(straight, 1);
+
+        let accel_inputs = vec![hold(1.0, 0.0, 0.0); 64];
+        for input in &accel_inputs {
+            sim_plain.tick(&[*input]);
+            sim_handbrake.tick(&[*input]);
+        }
+
+        // Both cars now enter a left turn: plain cornering vs handbrake cornering.
+        let plain_turn = CarInput {
+            throttle: 0.5,
+            brake: 0.0,
+            steer: 1.0,
+            handbrake: false,
+        };
+        let handbrake_turn = CarInput {
+            throttle: 0.5,
+            brake: 0.0,
+            steer: 1.0,
+            handbrake: true,
+        };
+
+        let mut max_slip_plain = 0.0f32;
+        let mut max_slip_handbrake = 0.0f32;
+
+        for _ in 0..32 {
+            let snap_plain = sim_plain.tick(&[plain_turn])[0];
+            let snap_hb = sim_handbrake.tick(&[handbrake_turn])[0];
+
+            let left_plain = Vec2::new(-snap_plain.heading.sin(), snap_plain.heading.cos());
+            let left_hb = Vec2::new(-snap_hb.heading.sin(), snap_hb.heading.cos());
+
+            let slip_plain = snap_plain.velocity.dot(left_plain).abs();
+            let slip_hb = snap_hb.velocity.dot(left_hb).abs();
+
+            max_slip_plain = max_slip_plain.max(slip_plain);
+            max_slip_handbrake = max_slip_handbrake.max(slip_hb);
+        }
+
+        assert!(
+            max_slip_handbrake > max_slip_plain * 1.5,
+            "handbrake cornering must exhibit significantly higher lateral slip: hb={}, plain={}",
+            max_slip_handbrake,
+            max_slip_plain
+        );
+    }
+
+    #[test]
+    fn braking_into_a_corner_changes_trajectory_versus_coasting_in() {
+        let straight = straight_track();
+        let mut sim_coast = Sim::new(straight.clone(), 1);
+        let mut sim_brake = Sim::new(straight, 1);
+
+        let accel_inputs = vec![hold(1.0, 0.0, 0.0); 64];
+        for input in &accel_inputs {
+            sim_coast.tick(&[*input]);
+            sim_brake.tick(&[*input]);
+        }
+
+        let coast_turn = CarInput {
+            throttle: 0.0,
+            brake: 0.0,
+            steer: 1.0,
+            handbrake: false,
+        };
+        let brake_turn = CarInput {
+            throttle: 0.0,
+            brake: 0.6,
+            steer: 1.0,
+            handbrake: false,
+        };
+
+        let mut snap_coast = None;
+        let mut snap_brake = None;
+        for _ in 0..32 {
+            snap_coast = Some(sim_coast.tick(&[coast_turn])[0]);
+            snap_brake = Some(sim_brake.tick(&[brake_turn])[0]);
+        }
+
+        let coast = snap_coast.unwrap();
+        let brake = snap_brake.unwrap();
+        // Weight transfer shifts load forward, sharpening rotation and altering trajectory.
+        assert!(
+            (coast.pose - brake.pose).length() > 2.0,
+            "braking into corner must change trajectory versus coasting: coast={:?}, brake={:?}",
+            coast.pose,
+            brake.pose
+        );
+        assert!(
+            (coast.heading - brake.heading).abs() > 0.05,
+            "headings must diverge under weight transfer"
+        );
+    }
+
+    #[test]
+    fn drift_state_is_exposed_on_the_snapshot() {
+        let straight = straight_track();
+        let mut sim = Sim::new(straight, 1);
+
+        // Straight-line driving: not drifting.
+        let straight_inputs = vec![hold(1.0, 0.0, 0.0); 64];
+        for input in &straight_inputs {
+            let snap = sim.tick(&[*input])[0];
+            assert!(
+                !snap.drifting,
+                "straight acceleration must not trigger drift"
+            );
+        }
+
+        // Hard turn with handbrake at speed: enters drift.
+        let mut observed_drift = false;
+        let hb_turn = CarInput {
+            throttle: 0.5,
+            brake: 0.0,
+            steer: 1.0,
+            handbrake: true,
+        };
+        for _ in 0..32 {
+            let snap = sim.tick(&[hb_turn])[0];
+            if snap.drifting {
+                observed_drift = true;
+                break;
+            }
+        }
+        assert!(
+            observed_drift,
+            "hard handbrake turn at speed must trigger drifting state on snapshot"
+        );
+    }
+
+    #[test]
+    fn handbrake_at_speed_stops_without_reversing() {
+        let straight = straight_track();
+        let mut sim = Sim::new(straight, 1);
+        for _ in 0..64 {
+            sim.tick(&[hold(1.0, 0.0, 0.0)]);
+        }
+        let hb_stop = CarInput {
+            throttle: 0.0,
+            brake: 0.0,
+            steer: 0.0,
+            handbrake: true,
+        };
+        for _ in 0..128 {
+            let snap = sim.tick(&[hb_stop])[0];
+            assert!(
+                snap.forward_speed >= 0.0,
+                "handbrake must not drive the car in reverse: got {}",
+                snap.forward_speed
+            );
+        }
     }
 }
