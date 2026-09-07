@@ -99,7 +99,6 @@ pub struct ShellSimulation {
     pub sim: Sim,
     pub prev_snapshot: CarSnapshot,
     pub curr_snapshot: CarSnapshot,
-    pub tick_count: u64,
 }
 
 impl ShellSimulation {
@@ -110,7 +109,6 @@ impl ShellSimulation {
             sim,
             prev_snapshot: initial,
             curr_snapshot: initial,
-            tick_count: 0,
         }
     }
 }
@@ -123,7 +121,9 @@ impl Plugin for RacerGamePlugin {
         let track = Track::parse(SAMPLE_CIRCUIT).expect("sample circuit must parse");
         app.insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
             .insert_resource(ShellSimulation::new(track))
+            .init_resource::<PlayerInput>()
             .add_systems(Startup, (setup_camera, setup_track, setup_car))
+            .add_systems(PreUpdate, read_keyboard_input)
             .add_systems(FixedUpdate, step_simulation)
             .add_systems(Update, (update_letterbox, interpolate_car_and_camera));
     }
@@ -274,53 +274,62 @@ fn setup_car(
         CarVisual,
     ));
 }
+/// Player input mapped from keyboard devices.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlayerInput(pub CarInput);
 
-/// Deterministic, open-loop scripted inputs driving the verification Car.
-/// Holds zero game rules or closed-loop driver policy.
-pub fn scripted_input_for_tick(tick: u64) -> CarInput {
-    let phase = tick % 320;
-    match phase {
-        0..=79 => CarInput {
-            throttle: 1.0,
-            brake: 0.0,
-            steer: 0.0,
-            handbrake: false,
-        },
-        80..=129 => CarInput {
-            throttle: 0.6,
-            brake: 0.0,
-            steer: 0.75,
-            handbrake: false,
-        },
-        130..=219 => CarInput {
-            throttle: 1.0,
-            brake: 0.0,
-            steer: 0.0,
-            handbrake: false,
-        },
-        220..=269 => CarInput {
-            throttle: 0.6,
-            brake: 0.0,
-            steer: 0.75,
-            handbrake: false,
-        },
-        _ => CarInput {
-            throttle: 1.0,
-            brake: 0.0,
-            steer: 0.0,
-            handbrake: false,
-        },
+/// Pure function mapping keyboard boolean states to `CarInput`.
+///
+/// Controls:
+/// - `up` (ArrowUp / W): throttle 1.0
+/// - `down` (ArrowDown / S): brake 1.0 (held at standstill engages reverse)
+/// - `left` (ArrowLeft / A): steer +1.0 (counter-clockwise)
+/// - `right` (ArrowRight / D): steer -1.0 (clockwise)
+/// - `handbrake` (Space): handbrake true
+pub fn map_keyboard_input(
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+    handbrake: bool,
+) -> CarInput {
+    let throttle = if up { 1.0 } else { 0.0 };
+    let brake = if down { 1.0 } else { 0.0 };
+    let mut steer = 0.0;
+    if left {
+        steer += 1.0;
+    }
+    if right {
+        steer -= 1.0;
+    }
+    CarInput {
+        throttle,
+        brake,
+        steer,
+        handbrake,
     }
 }
 
-/// Fixed step system: advances the simulation at 64 Hz using scripted inputs for verification.
-fn step_simulation(mut shell: ResMut<ShellSimulation>) {
+/// Reads keyboard input from Bevy device resources and updates `PlayerInput`.
+/// The simulation never reads keyboard devices.
+pub fn read_keyboard_input(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut player_input: ResMut<PlayerInput>,
+) {
+    let up = keyboard.any_pressed([KeyCode::ArrowUp, KeyCode::KeyW]);
+    let down = keyboard.any_pressed([KeyCode::ArrowDown, KeyCode::KeyS]);
+    let left = keyboard.any_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]);
+    let right = keyboard.any_pressed([KeyCode::ArrowRight, KeyCode::KeyD]);
+    let handbrake = keyboard.pressed(KeyCode::Space);
+
+    player_input.0 = map_keyboard_input(up, down, left, right, handbrake);
+}
+
+/// Fixed step system: advances the simulation at 64 Hz using mapped player inputs.
+fn step_simulation(mut shell: ResMut<ShellSimulation>, player_input: Res<PlayerInput>) {
     shell.prev_snapshot = shell.curr_snapshot;
 
-    let input = scripted_input_for_tick(shell.tick_count);
-    shell.tick_count += 1;
-
-    let snaps = shell.sim.tick(&[input]);
+    let snaps = shell.sim.tick(&[player_input.0]);
     shell.curr_snapshot = snaps[0];
 }
 
@@ -469,16 +478,99 @@ mod tests {
     }
 
     #[test]
-    fn scripted_input_sequence_is_deterministic_and_open_loop() {
-        let i0 = scripted_input_for_tick(0);
-        assert_eq!(i0.throttle, 1.0);
-        assert_eq!(i0.steer, 0.0);
+    fn map_keyboard_input_neutral_is_zero() {
+        let input = map_keyboard_input(false, false, false, false, false);
+        assert_eq!(input, CarInput::default());
+    }
 
-        let i85 = scripted_input_for_tick(85);
-        assert_eq!(i85.throttle, 0.6);
-        assert_eq!(i85.steer, 0.75);
+    #[test]
+    fn map_keyboard_input_all_five_controls() {
+        // 1. Throttle
+        let throttle = map_keyboard_input(true, false, false, false, false);
+        assert_eq!(throttle.throttle, 1.0);
+        assert_eq!(throttle.brake, 0.0);
 
-        // Deterministic cyclic repetition
-        assert_eq!(scripted_input_for_tick(0), scripted_input_for_tick(320));
+        // 2. Brake
+        let brake = map_keyboard_input(false, true, false, false, false);
+        assert_eq!(brake.brake, 1.0);
+        assert_eq!(brake.throttle, 0.0);
+
+        // 3. Steer left
+        let left = map_keyboard_input(false, false, true, false, false);
+        assert_eq!(left.steer, 1.0);
+
+        // 4. Steer right
+        let right = map_keyboard_input(false, false, false, true, false);
+        assert_eq!(right.steer, -1.0);
+
+        // 5. Handbrake
+        let hb = map_keyboard_input(false, false, false, false, true);
+        assert!(hb.handbrake);
+    }
+
+    #[test]
+    fn map_keyboard_input_opposing_steer_cancels() {
+        let input = map_keyboard_input(false, false, true, true, false);
+        assert_eq!(input.steer, 0.0);
+    }
+
+    #[test]
+    fn reverse_engages_when_stopped_and_holding_brake() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new(track, 1);
+
+        // Car is at standstill. Holding down/brake for 24 ticks (> 16 ticks threshold)
+        let brake_input = map_keyboard_input(false, true, false, false, false);
+        let mut snaps = Vec::new();
+        for _ in 0..24 {
+            snaps.extend(sim.tick(&[brake_input]));
+        }
+
+        let last = snaps.last().unwrap();
+        assert!(
+            last.forward_speed < 0.0,
+            "reverse must engage when braking at a standstill: speed was {}",
+            last.forward_speed
+        );
+    }
+
+    #[test]
+    fn read_keyboard_input_system_maps_wasd_and_arrows() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<PlayerInput>()
+            .add_systems(Update, read_keyboard_input);
+
+        // Test WASD + Space
+        {
+            let mut keyboard = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keyboard.press(KeyCode::KeyW);
+            keyboard.press(KeyCode::KeyA);
+            keyboard.press(KeyCode::Space);
+        }
+        app.update();
+        {
+            let player_input = app.world().resource::<PlayerInput>();
+            assert_eq!(player_input.0.throttle, 1.0);
+            assert_eq!(player_input.0.steer, 1.0);
+            assert!(player_input.0.handbrake);
+        }
+
+        // Test Arrows
+        {
+            let mut keyboard = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keyboard.release(KeyCode::KeyW);
+            keyboard.release(KeyCode::KeyA);
+            keyboard.release(KeyCode::Space);
+            keyboard.press(KeyCode::ArrowDown);
+            keyboard.press(KeyCode::ArrowRight);
+        }
+        app.update();
+        {
+            let player_input = app.world().resource::<PlayerInput>();
+            assert_eq!(player_input.0.brake, 1.0);
+            assert_eq!(player_input.0.steer, -1.0);
+            assert!(!player_input.0.handbrake);
+        }
     }
 }
