@@ -1,100 +1,56 @@
 //! Shell library for Topdown Racer: camera, rendering, and simulation glue.
 
+mod audio;
+mod best_lap;
+mod camera;
+mod hud;
+mod menu;
+mod overlay;
+mod results;
+
+pub use audio::{
+    create_pcm_wav, engine_pitch_from_speed, generate_engine_loop_wav, generate_skid_loop_wav,
+    mute_audio, skid_volume_from_drift, unmute_audio, update_audio, EngineAudio, SkidAudio,
+    DEFAULT_ENGINE_VOLUME,
+};
+pub use best_lap::{
+    default_best_lap_path, format_best_target, load_best_lap, maybe_save_best_lap,
+    persist_best_lap_on_finish, SavedBestLap, BEST_LAP_FILE_NAME,
+};
+pub use camera::{
+    compute_letterbox_viewport, interpolate_heading, interpolate_pose, wrap_angle, FollowCamera,
+    ViewportRect,
+};
+pub use hud::{
+    countdown_display, format_hud_data, format_time, CountdownText, HudData, HudElement, HudRoot,
+};
+pub use menu::{
+    esc_to_menu_system, menu_action_system, reset_race_on_enter, spawn_menu_ui, MenuUi, StartButton,
+};
+pub use overlay::despawn_screens;
+pub use results::{
+    detect_race_finish, format_opt_lap_time, format_results, results_action_system,
+    should_show_results, spawn_results_ui, ResultRow, ResultsUi,
+};
+
 use bevy::{
-    prelude::*,
-    render::{camera::Viewport, view::window::screenshot::ScreenshotManager},
-    window::PrimaryWindow,
+    prelude::*, render::view::window::screenshot::ScreenshotManager, window::PrimaryWindow,
 };
 use glam::Vec2;
 use topdown_racer_core::{
-    simulation::{
-        AiDriver, CarInput, CarSnapshot, RacePhase, Sim, DEFAULT_COUNTDOWN_TICKS, FIXED_DT,
-        FIXED_HZ,
-    },
+    simulation::{AiDriver, CarInput, CarSnapshot, RacePhase, Sim, FIXED_HZ},
     track::{Surface, Track, SAMPLE_CIRCUIT},
 };
+
+use audio::setup_audio;
+use camera::{interpolate_car_and_camera, setup_camera, update_letterbox};
+use hud::{hide_hud, setup_hud, show_hud, update_countdown_overlay, update_hud};
 
 /// Canonical aspect ratio for the game view (16:9).
 pub const TARGET_ASPECT_RATIO: f32 = 16.0 / 9.0;
 
 /// Fixed camera zoom (orthographic scale). Smaller value = closer zoom.
 pub const CAMERA_ZOOM: f32 = 0.05;
-
-/// Rectangular viewport region for letterboxing/pillarboxing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ViewportRect {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Computes the pixel viewport rectangle to letterbox or pillarbox
-/// a target aspect ratio inside a window of size `(window_width, window_height)`.
-pub fn compute_letterbox_viewport(
-    window_width: u32,
-    window_height: u32,
-    target_aspect: f32,
-) -> ViewportRect {
-    if window_width == 0 || window_height == 0 || target_aspect <= 0.0 {
-        return ViewportRect {
-            x: 0,
-            y: 0,
-            width: window_width,
-            height: window_height,
-        };
-    }
-
-    let current_aspect = window_width as f32 / window_height as f32;
-
-    if current_aspect > target_aspect {
-        // Window is wider than target: pillarbox (black bars left and right).
-        let viewport_width = (window_height as f32 * target_aspect).round() as u32;
-        let x = (window_width.saturating_sub(viewport_width)) / 2;
-        ViewportRect {
-            x,
-            y: 0,
-            width: viewport_width.min(window_width),
-            height: window_height,
-        }
-    } else {
-        // Window is taller than target: letterbox (black bars top and bottom).
-        let viewport_height = (window_width as f32 / target_aspect).round() as u32;
-        let y = (window_height.saturating_sub(viewport_height)) / 2;
-        ViewportRect {
-            x: 0,
-            y,
-            width: window_width,
-            height: viewport_height.min(window_height),
-        }
-    }
-}
-
-/// Wraps an angle delta to the range $[-\pi, \pi]$ taking the shortest rotational path.
-pub fn wrap_angle(mut delta: f32) -> f32 {
-    while delta > std::f32::consts::PI {
-        delta -= 2.0 * std::f32::consts::PI;
-    }
-    while delta < -std::f32::consts::PI {
-        delta += 2.0 * std::f32::consts::PI;
-    }
-    delta
-}
-
-/// Smoothly interpolates an angle in radians between `prev` and `curr` taking
-/// the shortest rotational path across the $[-\pi, \pi]$ boundary.
-pub fn interpolate_heading(prev: f32, curr: f32, alpha: f32) -> f32 {
-    prev + wrap_angle(curr - prev) * alpha
-}
-
-/// Interpolates 2D world position.
-pub fn interpolate_pose(prev: Vec2, curr: Vec2, alpha: f32) -> Vec2 {
-    prev.lerp(curr, alpha)
-}
-
-/// Component tagging the follow camera.
-#[derive(Component)]
-pub struct FollowCamera;
 
 /// Component tagging a rendered Car chassis and identifying its car index.
 #[derive(Component)]
@@ -113,8 +69,6 @@ pub struct ShellSimulation {
     pub curr_snapshots: Vec<CarSnapshot>,
     /// Fixed ticks elapsed since the race phase began (green), for overlay timing.
     pub racing_ticks: u32,
-    /// AI controller for automatic driving of the player's car.
-    pub player_ai: AiDriver,
     /// Whether player car autopilot is enabled when no manual controls are pressed.
     pub autopilot: bool,
 }
@@ -125,13 +79,13 @@ impl ShellSimulation {
     }
 
     fn from_sim(mut sim: Sim) -> Self {
+        sim.set_ai(0, Some(AiDriver::new(0)));
         let initial = sim.tick(&[CarInput::default()]);
         Self {
             sim,
             prev_snapshots: initial.clone(),
             curr_snapshots: initial,
             racing_ticks: 0,
-            player_ai: AiDriver::new(0),
             autopilot: true,
         }
     }
@@ -150,25 +104,6 @@ pub enum AppState {
     Menu,
     Race,
     Results,
-}
-
-/// Maps a race phase to the countdown overlay text shown on screen.
-pub fn countdown_display(phase: RacePhase) -> &'static str {
-    match phase {
-        RacePhase::Countdown { ticks_remaining } => {
-            let elapsed = DEFAULT_COUNTDOWN_TICKS.saturating_sub(ticks_remaining);
-            let third = DEFAULT_COUNTDOWN_TICKS / 3;
-            if elapsed < third {
-                "3"
-            } else if elapsed < third * 2 {
-                "2"
-            } else {
-                "1"
-            }
-        }
-        RacePhase::Racing => "GO!",
-        RacePhase::Finished => "",
-    }
 }
 
 /// Main game plugin wiring camera, track rendering, simulation fixed step, and motion interpolation.
@@ -250,11 +185,6 @@ impl Plugin for RacerGamePlugin {
 /// on the first frame, so OnEnter(Race) systems (HUD show, race reset) still run.
 fn auto_start_race(mut next_state: ResMut<NextState<AppState>>) {
     next_state.set(AppState::Race);
-}
-fn setup_camera(mut commands: Commands) {
-    let mut camera = Camera2dBundle::default();
-    camera.projection.scale = CAMERA_ZOOM;
-    commands.spawn((camera, FollowCamera));
 }
 
 fn setup_track(
@@ -658,6 +588,7 @@ fn setup_car(
             });
     }
 }
+
 /// Player input mapped from keyboard devices.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
 pub struct PlayerInput(pub CarInput);
@@ -715,21 +646,7 @@ fn step_simulation(mut shell: ResMut<ShellSimulation>, player_input: Res<PlayerI
     shell.prev_snapshots = shell.curr_snapshots.clone();
 
     let manual_input = player_input.0;
-    let manual_active = manual_input != CarInput::default();
-
-    let player_input_effective = if shell.autopilot && !manual_active {
-        let snap = shell.curr_snapshots[0];
-        let fwd = Vec2::new(snap.heading.cos(), snap.heading.sin());
-        let fwd_speed = snap.velocity.dot(fwd);
-        let track = shell.sim.track().clone();
-        shell
-            .player_ai
-            .compute_input(snap.pose, snap.heading, fwd_speed, &track)
-    } else {
-        manual_input
-    };
-
-    let snaps = shell.sim.tick(&[player_input_effective]);
+    let snaps = shell.sim.tick(&[manual_input]);
     shell.curr_snapshots = snaps;
     if shell.sim.phase() == RacePhase::Racing {
         shell.racing_ticks += 1;
@@ -743,6 +660,15 @@ pub fn toggle_autopilot_system(
 ) {
     if keyboard.just_pressed(KeyCode::KeyT) {
         shell.autopilot = !shell.autopilot;
+        let autopilot = shell.autopilot;
+        shell.sim.set_ai(
+            0,
+            if autopilot {
+                Some(AiDriver::new(0))
+            } else {
+                None
+            },
+        );
     }
 }
 
@@ -874,814 +800,6 @@ pub fn frame_capture_system(
         {
             capture.frame_count -= 1;
         }
-    }
-}
-
-/// Updates camera viewport letterboxing when the window size changes.
-fn update_letterbox(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    mut cameras: Query<&mut Camera, With<FollowCamera>>,
-) {
-    let Ok(window) = windows.get_single() else {
-        return;
-    };
-    let Ok(mut camera) = cameras.get_single_mut() else {
-        return;
-    };
-
-    let width = window.physical_width();
-    let height = window.physical_height();
-    let rect = compute_letterbox_viewport(width, height, TARGET_ASPECT_RATIO);
-
-    camera.viewport = Some(Viewport {
-        physical_position: UVec2::new(rect.x, rect.y),
-        physical_size: UVec2::new(rect.width, rect.height),
-        depth: 0.0..1.0,
-    });
-}
-
-/// Interpolates Car visual transform and follow Camera between fixed steps.
-fn interpolate_car_and_camera(
-    shell: Res<ShellSimulation>,
-    fixed_time: Res<Time<Fixed>>,
-    mut cars: Query<(&CarVisual, &mut Transform), Without<FollowCamera>>,
-    mut cameras: Query<&mut Transform, (With<FollowCamera>, Without<CarVisual>)>,
-) {
-    let alpha = fixed_time.overstep_fraction();
-
-    for (visual, mut car_tf) in cars.iter_mut() {
-        if let (Some(prev), Some(curr)) = (
-            shell.prev_snapshots.get(visual.car_index),
-            shell.curr_snapshots.get(visual.car_index),
-        ) {
-            let interp_pose = interpolate_pose(prev.pose, curr.pose, alpha);
-            let interp_heading = interpolate_heading(prev.heading, curr.heading, alpha);
-
-            car_tf.translation.x = interp_pose.x;
-            car_tf.translation.y = interp_pose.y;
-            car_tf.rotation = Quat::from_rotation_z(interp_heading);
-
-            // Follow camera tracks player Car (index 0)
-            if visual.car_index == 0 {
-                for mut cam_tf in cameras.iter_mut() {
-                    cam_tf.translation.x = interp_pose.x;
-                    cam_tf.translation.y = interp_pose.y;
-                    cam_tf.rotation = Quat::IDENTITY;
-                }
-            }
-        }
-    }
-}
-
-/// Formatted HUD strings derived from simulation snapshots.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HudData {
-    pub lap: String,
-    pub position: String,
-    pub current_lap_time: String,
-    pub best_lap_time: String,
-    pub speed: String,
-}
-
-/// Formats a time duration in seconds into `MM:SS.hh`.
-pub fn format_time(seconds: f32) -> String {
-    let total_hundredths = (seconds.max(0.0) * 100.0).round() as u32;
-    let hundredths = total_hundredths % 100;
-    let total_seconds = total_hundredths / 100;
-    let secs = total_seconds % 60;
-    let mins = total_seconds / 60;
-    format!("{:02}:{:02}.{:02}", mins, secs, hundredths)
-}
-
-/// Pure projection function mapping a player snapshot to HUD display data.
-/// Holds zero local game rules or race state logic.
-pub fn format_hud_data(player_snap: &CarSnapshot, total_cars: usize) -> HudData {
-    use topdown_racer_core::simulation::TOTAL_LAPS;
-    let current_lap = (player_snap.completed_laps + 1).min(TOTAL_LAPS);
-    let lap = format!("LAP {}/{}", current_lap, TOTAL_LAPS);
-
-    let position = format!("POS {}/{}", ordinal(player_snap.position), total_cars);
-
-    let current_lap_time = format!("LAP TIME {}", format_time(player_snap.current_lap_time));
-
-    let best_lap_time = format!("BEST {}", format_opt_lap_time(player_snap.best_lap_time));
-
-    let speed_val = (player_snap.forward_speed.max(0.0).round()) as u32;
-    let speed = format!("SPEED {} u/s", speed_val);
-
-    HudData {
-        lap,
-        position,
-        current_lap_time,
-        best_lap_time,
-        speed,
-    }
-}
-
-/// Component tagging which HUD field a text element displays.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HudElement {
-    Lap,
-    Position,
-    CurrentTime,
-    BestTime,
-    Speed,
-}
-fn setup_hud(mut commands: Commands) {
-    let text_style = TextStyle {
-        font_size: 20.0,
-        color: Color::WHITE,
-        ..default()
-    };
-
-    commands
-        .spawn((
-            NodeBundle {
-                style: Style {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    justify_content: JustifyContent::SpaceBetween,
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(16.0)),
-                    ..default()
-                },
-                visibility: Visibility::Hidden,
-                ..default()
-            },
-            HudRoot,
-        ))
-        .with_children(|root| {
-            // Top bar
-            root.spawn(NodeBundle {
-                style: Style {
-                    width: Val::Percent(100.0),
-                    justify_content: JustifyContent::SpaceBetween,
-                    ..default()
-                },
-                ..default()
-            })
-            .with_children(|top_bar| {
-                // Top-left
-                top_bar
-                    .spawn(NodeBundle {
-                        style: Style {
-                            flex_direction: FlexDirection::Column,
-                            ..default()
-                        },
-                        ..default()
-                    })
-                    .with_children(|left| {
-                        left.spawn((
-                            TextBundle::from_section("LAP 1/3", text_style.clone()),
-                            HudElement::Lap,
-                        ));
-                        left.spawn((
-                            TextBundle::from_section("POS 1st/4", text_style.clone()),
-                            HudElement::Position,
-                        ));
-                    });
-
-                // Top-right
-                top_bar
-                    .spawn(NodeBundle {
-                        style: Style {
-                            flex_direction: FlexDirection::Column,
-                            align_items: AlignItems::FlexEnd,
-                            ..default()
-                        },
-                        ..default()
-                    })
-                    .with_children(|right| {
-                        right.spawn((
-                            TextBundle::from_section("LAP TIME 00:00.00", text_style.clone()),
-                            HudElement::CurrentTime,
-                        ));
-                        right.spawn((
-                            TextBundle::from_section("BEST --:--.--", text_style.clone()),
-                            HudElement::BestTime,
-                        ));
-                    });
-            });
-
-            // Bottom bar
-            root.spawn(NodeBundle {
-                style: Style {
-                    width: Val::Percent(100.0),
-                    justify_content: JustifyContent::FlexEnd,
-                    ..default()
-                },
-                ..default()
-            })
-            .with_children(|bottom_bar| {
-                bottom_bar.spawn((
-                    TextBundle::from_section("SPEED 0 u/s", text_style.clone()),
-                    HudElement::Speed,
-                ));
-            });
-        });
-
-    // Centered countdown overlay shown during the countdown phase.
-    commands.spawn((
-        TextBundle {
-            text: Text::from_section(
-                "3",
-                TextStyle {
-                    font_size: 96.0,
-                    color: Color::WHITE,
-                    ..default()
-                },
-            ),
-            style: Style {
-                position_type: PositionType::Absolute,
-                left: Val::Percent(50.0),
-                top: Val::Percent(40.0),
-                ..default()
-            },
-            visibility: Visibility::Hidden,
-            ..default()
-        },
-        CountdownText,
-    ));
-}
-
-fn update_hud(shell: Res<ShellSimulation>, mut hud_query: Query<(&HudElement, &mut Text)>) {
-    let Some(player_snap) = shell.curr_snapshots.first() else {
-        return;
-    };
-    let hud = format_hud_data(player_snap, shell.curr_snapshots.len());
-
-    for (element, mut text) in hud_query.iter_mut() {
-        match element {
-            HudElement::Lap => text.sections[0].value = hud.lap.clone(),
-            HudElement::Position => text.sections[0].value = hud.position.clone(),
-            HudElement::CurrentTime => text.sections[0].value = hud.current_lap_time.clone(),
-            HudElement::BestTime => text.sections[0].value = hud.best_lap_time.clone(),
-            HudElement::Speed => text.sections[0].value = hud.speed.clone(),
-        }
-    }
-}
-
-/// Marker for the HUD root node so it can hide behind the menu.
-#[derive(Component)]
-pub struct HudRoot;
-
-/// Marker for the countdown overlay text shown during the countdown phase.
-#[derive(Component)]
-pub struct CountdownText;
-
-/// Marker for the menu screen root entity.
-#[derive(Component)]
-pub struct MenuUi;
-
-/// Marker for the menu start button.
-#[derive(Component)]
-pub struct StartButton;
-
-/// Rebuilds a fresh countdown race whenever entering the Race state.
-pub fn reset_race_on_enter(mut shell: ResMut<ShellSimulation>) {
-    shell.reset_to_fresh_race();
-}
-
-/// Hides the HUD and countdown overlay while the menu is shown.
-pub fn hide_hud(
-    mut hud_q: Query<&mut Visibility, With<HudRoot>>,
-    mut countdown_q: Query<&mut Visibility, (With<CountdownText>, Without<HudRoot>)>,
-) {
-    for mut vis in hud_q.iter_mut() {
-        *vis = Visibility::Hidden;
-    }
-    for mut vis in countdown_q.iter_mut() {
-        *vis = Visibility::Hidden;
-    }
-}
-
-/// Shows the HUD and countdown overlay when a race starts.
-pub fn show_hud(
-    mut hud_q: Query<&mut Visibility, With<HudRoot>>,
-    mut countdown_q: Query<&mut Visibility, (With<CountdownText>, Without<HudRoot>)>,
-) {
-    for mut vis in hud_q.iter_mut() {
-        *vis = Visibility::Visible;
-    }
-    for mut vis in countdown_q.iter_mut() {
-        *vis = Visibility::Visible;
-    }
-}
-
-fn spawn_overlay_root<'a>(
-    commands: &'a mut Commands,
-    row_gap: f32,
-    alpha: f32,
-) -> bevy::ecs::system::EntityCommands<'a> {
-    commands.spawn(NodeBundle {
-        style: Style {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            position_type: PositionType::Absolute,
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(row_gap),
-            ..default()
-        },
-        background_color: BackgroundColor(Color::srgba(0.05, 0.05, 0.08, alpha)),
-        ..default()
-    })
-}
-/// Query matching menu and results screen roots.
-type ScreensQuery<'w, 's> = Query<'w, 's, Entity, Or<(With<MenuUi>, With<ResultsUi>)>>;
-
-/// Despawns menu and results screens when leaving them.
-pub fn despawn_screens(mut commands: Commands, screens_q: ScreensQuery) {
-    for entity in screens_q.iter() {
-        commands.entity(entity).despawn_recursive();
-    }
-}
-
-/// Spawns the menu screen with a start option and the saved best-lap target.
-pub fn spawn_menu_ui(mut commands: Commands, saved: Res<SavedBestLap>) {
-    let target_line = format_best_target(saved.0);
-    spawn_overlay_root(&mut commands, 16.0, 0.92)
-        .insert(MenuUi)
-        .with_children(|menu| {
-            menu.spawn(TextBundle::from_section(
-                "TOPDOWN RACER",
-                TextStyle {
-                    font_size: 48.0,
-                    color: Color::WHITE,
-                    ..default()
-                },
-            ));
-            menu.spawn(TextBundle::from_section(
-                target_line,
-                TextStyle {
-                    font_size: 22.0,
-                    color: Color::srgb(1.0, 0.85, 0.3),
-                    ..default()
-                },
-            ));
-            menu.spawn((
-                ButtonBundle {
-                    style: Style {
-                        padding: UiRect::axes(Val::Px(32.0), Val::Px(12.0)),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    background_color: BackgroundColor(Color::srgb(0.2, 0.55, 0.25)),
-                    ..default()
-                },
-                StartButton,
-            ))
-            .with_children(|button| {
-                button.spawn(TextBundle::from_section(
-                    "START RACE (Enter)",
-                    TextStyle {
-                        font_size: 24.0,
-                        color: Color::WHITE,
-                        ..default()
-                    },
-                ));
-            });
-        });
-}
-
-/// Starts the race from the menu via the button or the Enter key.
-pub fn menu_action_system(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    button_q: Query<&Interaction, (Changed<Interaction>, With<StartButton>)>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    let button_clicked = button_q
-        .iter()
-        .any(|interaction| *interaction == Interaction::Pressed);
-    if button_clicked || keyboard.just_pressed(KeyCode::Enter) {
-        next_state.set(AppState::Race);
-    }
-}
-
-/// Returns cleanly to the menu when ESC is pressed during a race.
-pub fn esc_to_menu_system(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    if keyboard.just_pressed(KeyCode::Escape) {
-        next_state.set(AppState::Menu);
-    }
-}
-
-/// Updates the countdown overlay text from the simulation phase.
-pub fn update_countdown_overlay(
-    shell: Res<ShellSimulation>,
-    mut countdown_q: Query<&mut Text, With<CountdownText>>,
-) {
-    let text = match shell.sim.phase() {
-        // Clear the green flash once the race is underway (time since green,
-        // not the per-lap timer which resets at every lap line).
-        RacePhase::Racing if shell.racing_ticks as f32 * FIXED_DT > 2.0 => "",
-        phase => countdown_display(phase),
-    };
-    for mut t in countdown_q.iter_mut() {
-        t.sections[0].value = text.to_owned();
-    }
-}
-
-/// Best lap loaded from local storage, shown on the menu as the target to beat.
-#[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
-pub struct SavedBestLap(pub Option<f32>);
-
-/// File name holding the persisted best lap inside the app config directory.
-pub const BEST_LAP_FILE_NAME: &str = "best_lap.txt";
-
-/// Platform config base directory for local-only storage. Falls back to the current
-/// working directory (`"."`) when standard platform environment variables (HOME / APPDATA / XDG) are unset.
-fn config_base_dir() -> std::path::PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("APPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        home_dir().join("Library/Application Support")
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-            std::path::PathBuf::from(xdg)
-        } else {
-            home_dir().join(".config")
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn home_dir() -> std::path::PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn home_dir() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-}
-
-/// Local-only file path for the persisted best lap.
-pub fn default_best_lap_path() -> std::path::PathBuf {
-    let mut path = config_base_dir();
-    path.push("topdown-racer");
-    path.push(BEST_LAP_FILE_NAME);
-    path
-}
-
-/// Loads the saved best lap in seconds. Returns `None` when no valid save exists.
-pub fn load_best_lap(path: &std::path::Path) -> Option<f32> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let secs: f32 = text.trim().parse().ok()?;
-    if secs.is_finite() && secs > 0.0 {
-        Some(secs)
-    } else {
-        None
-    }
-}
-
-/// Writes `candidate` as the saved best lap only when it beats the stored value.
-/// Returns the best lap now stored (the previous value when the candidate is slower).
-pub fn maybe_save_best_lap(path: &std::path::Path, candidate: f32) -> std::io::Result<Option<f32>> {
-    let current = load_best_lap(path);
-    let better = match current {
-        None => true,
-        Some(best) => candidate < best,
-    };
-    if better {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, format!("{candidate}\n"))?;
-        Ok(Some(candidate))
-    } else {
-        Ok(current)
-    }
-}
-
-/// Formats the menu target line from the saved best lap.
-pub fn format_best_target(saved: Option<f32>) -> String {
-    match saved {
-        Some(best) => format!("TARGET TO BEAT — BEST {}", format_time(best)),
-        None => "TARGET TO BEAT — no best lap yet".to_owned(),
-    }
-}
-
-/// Persists the player's best lap when a race finishes.
-pub fn persist_best_lap_on_finish(shell: Res<ShellSimulation>, mut saved: ResMut<SavedBestLap>) {
-    let Some(player_snap) = shell.curr_snapshots.first() else {
-        return;
-    };
-    if let Some(best) = player_snap.best_lap_time {
-        match maybe_save_best_lap(&default_best_lap_path(), best) {
-            Ok(stored) => saved.0 = stored,
-            Err(err) => warn!("failed to persist best lap: {err}"),
-        }
-    }
-}
-
-/// Returns true only when the race phase warrants showing the results screen.
-pub fn should_show_results(phase: RacePhase) -> bool {
-    phase == RacePhase::Finished
-}
-
-/// One row of the results table: finishing position, car number, and lap times.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultRow {
-    pub position: usize,
-    pub car_number: usize,
-    pub lap_times: Vec<String>,
-    pub best_lap: String,
-}
-
-/// Pure projection of race snapshots to an ordered results table.
-/// Holds zero local game rules: ordering reuses the simulation's live positions.
-pub fn format_results(snaps: &[CarSnapshot]) -> Vec<ResultRow> {
-    let mut ordered: Vec<(usize, &CarSnapshot)> = snaps.iter().enumerate().collect();
-    ordered.sort_by_key(|(_, snap)| snap.position);
-    ordered
-        .into_iter()
-        .map(|(car_index, snap)| {
-            let lap_times = snap
-                .lap_times
-                .iter()
-                .map(|t| format_opt_lap_time(*t))
-                .collect();
-            let best_lap = format_opt_lap_time(snap.best_lap_time);
-            ResultRow {
-                position: snap.position,
-                car_number: car_index + 1,
-                lap_times,
-                best_lap,
-            }
-        })
-        .collect()
-}
-
-/// Formats an optional lap time, showing a placeholder when no lap is recorded.
-pub fn format_opt_lap_time(seconds: Option<f32>) -> String {
-    match seconds {
-        Some(secs) => format_time(secs),
-        None => "--:--.--".to_owned(),
-    }
-}
-
-/// Marker for the results screen root entity.
-#[derive(Component)]
-pub struct ResultsUi;
-
-/// Transitions to the results screen exactly when the race finishes.
-pub fn detect_race_finish(
-    shell: Res<ShellSimulation>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    if should_show_results(shell.sim.phase()) {
-        next_state.set(AppState::Results);
-    }
-}
-
-/// Spawns the results screen from simulation snapshots.
-pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
-    let rows = format_results(&shell.curr_snapshots);
-    spawn_overlay_root(&mut commands, 8.0, 0.94)
-        .insert(ResultsUi)
-        .with_children(|results| {
-            results.spawn(TextBundle::from_section(
-                "RACE FINISHED",
-                TextStyle {
-                    font_size: 40.0,
-                    color: Color::WHITE,
-                    ..default()
-                },
-            ));
-            for row in &rows {
-                let laps = row.lap_times.join("  ");
-                results.spawn(TextBundle::from_section(
-                    format!(
-                        "{} — Car {} — {} — Best {}",
-                        ordinal(row.position),
-                        row.car_number,
-                        laps,
-                        row.best_lap
-                    ),
-                    TextStyle {
-                        font_size: 20.0,
-                        color: Color::WHITE,
-                        ..default()
-                    },
-                ));
-            }
-            results.spawn(TextBundle::from_section(
-                "Press R to restart, ESC for menu",
-                TextStyle {
-                    font_size: 20.0,
-                    color: Color::srgb(0.7, 0.9, 0.7),
-                    ..default()
-                },
-            ));
-        });
-}
-
-/// Instant-restarts a fresh race (R / Enter) or returns to the menu (ESC).
-pub fn results_action_system(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    if keyboard.just_pressed(KeyCode::KeyR) || keyboard.just_pressed(KeyCode::Enter) {
-        // OnEnter(Race) rebuilds the fresh countdown race; no menu pass-through.
-        next_state.set(AppState::Race);
-    } else if keyboard.just_pressed(KeyCode::Escape) {
-        next_state.set(AppState::Menu);
-    }
-}
-
-/// Formats a 1-indexed position with its ordinal suffix.
-fn ordinal(position: usize) -> String {
-    match position {
-        1 => "1st".to_owned(),
-        2 => "2nd".to_owned(),
-        3 => "3rd".to_owned(),
-        n => format!("{n}th"),
-    }
-}
-
-/// Default audible playback volume for the engine loop.
-pub const DEFAULT_ENGINE_VOLUME: f32 = 0.3;
-
-/// Marker for the looping engine audio player entity.
-#[derive(Component)]
-pub struct EngineAudio;
-
-/// Marker for the looping tire skid audio player entity.
-#[derive(Component)]
-pub struct SkidAudio;
-
-/// Pure function mapping forward speed to engine audio playback speed (pitch).
-/// Idle speed (forward_speed <= 0.0) plays at 0.8x.
-/// As forward speed increases to top speed (~28.0 u/s), pitch scales smoothly up to ~2.4x.
-pub fn engine_pitch_from_speed(forward_speed: f32) -> f32 {
-    let speed = forward_speed.abs();
-    0.8 + (speed / 28.0) * 1.6
-}
-
-/// Pure function computing skid sound volume from drift state and speed.
-/// Returns 0.0 when not drifting or stopped.
-/// When drifting at speed, volume is non-zero (0.6).
-pub fn skid_volume_from_drift(drifting: bool, forward_speed: f32) -> f32 {
-    if drifting && forward_speed.abs() > 2.0 {
-        0.6
-    } else {
-        0.0
-    }
-}
-
-/// Creates a standard 44-byte WAV header followed by 16-bit signed PCM mono audio samples.
-pub fn create_pcm_wav(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
-    let file_len = 36 + data_len;
-    let mut bytes = Vec::with_capacity(44 + samples.len() * 2);
-
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&file_len.to_le_bytes());
-    bytes.extend_from_slice(b"WAVE");
-
-    bytes.extend_from_slice(b"fmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // Mono
-    bytes.extend_from_slice(&sample_rate.to_le_bytes());
-    let byte_rate = sample_rate * 2;
-    bytes.extend_from_slice(&byte_rate.to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes()); // Block align
-    bytes.extend_from_slice(&16u16.to_le_bytes()); // 16-bit
-
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_len.to_le_bytes());
-    for &s in samples {
-        bytes.extend_from_slice(&s.to_le_bytes());
-    }
-
-    bytes
-}
-
-/// Generates an in-memory loopable WAV waveform representing an engine tone.
-pub fn generate_engine_loop_wav() -> Vec<u8> {
-    let sample_rate = 44100u32;
-    // Exactly 25 full cycles of 110.25 Hz = 10000 samples for seamless looping
-    let sample_count = 10000;
-    let mut samples = Vec::with_capacity(sample_count);
-
-    let f0 = 110.25f32;
-    for i in 0..sample_count {
-        let t = i as f32 / sample_rate as f32;
-        let p = 2.0 * std::f32::consts::PI * f0 * t;
-        let v =
-            p.sin() * 0.5 + (p * 2.0).sin() * 0.3 + (p * 3.0).sin() * 0.15 + (p * 4.0).sin() * 0.05;
-        let sample = (v * 16000.0) as i16;
-        samples.push(sample);
-    }
-
-    create_pcm_wav(sample_rate, &samples)
-}
-
-/// Generates an in-memory loopable WAV waveform representing tire skid friction.
-pub fn generate_skid_loop_wav() -> Vec<u8> {
-    let sample_rate = 44100u32;
-    // Exactly 200 cycles of 882 Hz = 10000 samples for seamless looping
-    let sample_count = 10000;
-    let mut samples = Vec::with_capacity(sample_count);
-
-    for i in 0..sample_count {
-        let t = i as f32 / sample_rate as f32;
-        let carrier = (2.0 * std::f32::consts::PI * 882.0 * t).sin();
-        let modulator = (2.0 * std::f32::consts::PI * 176.4 * t).sin();
-        let hash = ((i.wrapping_mul(1103515245).wrapping_add(12345)) % 1000) as f32 / 1000.0 - 0.5;
-        let v = (carrier * 0.6 + carrier * modulator * 0.2 + hash * 0.2).clamp(-1.0, 1.0);
-        let sample = (v * 14000.0) as i16;
-        samples.push(sample);
-    }
-
-    create_pcm_wav(sample_rate, &samples)
-}
-
-/// Spawns procedural audio loops for engine and skid feedback.
-pub fn setup_audio(mut commands: Commands, mut audio_sources: ResMut<Assets<AudioSource>>) {
-    let engine_source = audio_sources.add(AudioSource {
-        bytes: generate_engine_loop_wav().into(),
-    });
-    let skid_source = audio_sources.add(AudioSource {
-        bytes: generate_skid_loop_wav().into(),
-    });
-
-    commands.spawn((
-        AudioBundle {
-            source: engine_source,
-            settings: PlaybackSettings::LOOP
-                .with_speed(0.8)
-                .with_volume(bevy::audio::Volume::ZERO),
-        },
-        EngineAudio,
-    ));
-
-    commands.spawn((
-        AudioBundle {
-            source: skid_source,
-            settings: PlaybackSettings::LOOP.with_volume(bevy::audio::Volume::ZERO),
-        },
-        SkidAudio,
-    ));
-}
-
-/// Updates engine pitch by speed and skid cue during Drift.
-/// Fails safe: if no audio hardware is present (or in headless CI), AudioSink query
-/// yields no entities, so this system executes cleanly without error.
-pub fn update_audio(
-    shell: Res<ShellSimulation>,
-    engine_q: Query<&AudioSink, With<EngineAudio>>,
-    skid_q: Query<&AudioSink, With<SkidAudio>>,
-) {
-    let Some(player_snap) = shell.curr_snapshots.first() else {
-        return;
-    };
-
-    let target_pitch = engine_pitch_from_speed(player_snap.forward_speed);
-    let target_skid_vol = skid_volume_from_drift(player_snap.drifting, player_snap.forward_speed);
-
-    for sink in engine_q.iter() {
-        sink.set_speed(target_pitch);
-    }
-    for sink in skid_q.iter() {
-        sink.set_volume(target_skid_vol);
-    }
-}
-
-/// Mutes audio while outside of an active race (e.g. Menu or Results).
-pub fn mute_audio(
-    engine_q: Query<&AudioSink, With<EngineAudio>>,
-    skid_q: Query<&AudioSink, With<SkidAudio>>,
-) {
-    for sink in engine_q.iter() {
-        sink.set_volume(0.0);
-    }
-    for sink in skid_q.iter() {
-        sink.set_volume(0.0);
-    }
-}
-
-/// Unmutes engine audio when starting/resuming an active race.
-pub fn unmute_audio(engine_q: Query<&AudioSink, With<EngineAudio>>) {
-    for sink in engine_q.iter() {
-        sink.set_volume(DEFAULT_ENGINE_VOLUME);
     }
 }
 
@@ -1912,6 +1030,7 @@ mod tests {
     #[test]
     fn hud_position_updates_when_cars_overtake_each_other() {
         let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+
         let mut sim = Sim::new(track, 4);
         sim.enable_ai_opponents();
 

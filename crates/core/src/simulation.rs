@@ -162,6 +162,13 @@ impl Sim {
         }
     }
 
+    /// Sets (or clears) the AI driver for one car. Out-of-range indices are ignored.
+    pub fn set_ai(&mut self, car_index: usize, ai: Option<AiDriver>) {
+        if let Some(car) = self.cars.get_mut(car_index) {
+            car.ai = ai;
+        }
+    }
+
     /// The parsed Track this sim runs on.
     pub fn track(&self) -> &Track {
         &self.track
@@ -211,7 +218,7 @@ impl Sim {
             let effective_input = if controls_locked {
                 CarInput::default()
             } else if let Some(ai) = &mut car.ai {
-                if inputs.len() > i {
+                if inputs.len() > i && inputs[i] != CarInput::default() {
                     inputs[i]
                 } else {
                     let fwd = forward(car.heading);
@@ -227,34 +234,7 @@ impl Sim {
 
             // In Racing phase, accumulate lap time and check ordered progress
             if self.phase == RacePhase::Racing {
-                car.current_lap_ticks += 1;
-
-                let target_cp = car.next_checkpoint;
-                let cp_pos = self.track.points[target_cp];
-                let entry_dir = if target_cp == 0 {
-                    cp_pos - self.track.points[total_cps - 1]
-                } else {
-                    cp_pos - self.track.points[target_cp - 1]
-                };
-                if (car.pose - cp_pos).length() < cp_radius && car.velocity.dot(entry_dir) > 0.0 {
-                    car.last_cleared_checkpoint = target_cp;
-                    if target_cp == 0 {
-                        // Crossed start/finish having visited all checkpoints in order
-                        if car.completed_laps < TOTAL_LAPS {
-                            let lap_time = car.current_lap_ticks as f32 * FIXED_DT;
-                            car.lap_times[car.completed_laps as usize] = Some(lap_time);
-                            car.best_lap_time = Some(match car.best_lap_time {
-                                Some(best) => best.min(lap_time),
-                                None => lap_time,
-                            });
-                            car.completed_laps += 1;
-                            car.current_lap_ticks = 0;
-                        }
-                        car.next_checkpoint = 1;
-                    } else {
-                        car.next_checkpoint = (target_cp + 1) % total_cps;
-                    }
-                }
+                advance_lap_progress(car, &self.track, total_cps, cp_radius);
             }
         }
 
@@ -269,24 +249,7 @@ impl Sim {
         }
 
         // Calculate live positions: sorted by progress score
-        let mut car_scores: Vec<(usize, f32)> = self
-            .cars
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let next_cp = self.track.points[c.next_checkpoint];
-                let dist_to_next = (c.pose - next_cp).length();
-                let score = c.completed_laps as f32 * 10000.0
-                    + c.last_cleared_checkpoint as f32 * 100.0
-                    - (dist_to_next / 1000.0);
-                (i, score)
-            })
-            .collect();
-        car_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let mut positions = vec![1; self.cars.len()];
-        for (pos_idx, (car_idx, _)) in car_scores.iter().enumerate() {
-            positions[*car_idx] = pos_idx + 1;
-        }
+        let positions = compute_positions(&self.cars, &self.track);
 
         // Build final snapshots
         self.cars
@@ -341,6 +304,65 @@ impl SurfacePhysics {
             },
         }
     }
+}
+
+/// Advances one Car's lap/checkpoint progress for a single tick: accumulates
+/// the current lap time and, on ordered checkpoint entry, records lap times,
+/// best lap, completed laps, and the next checkpoint to clear.
+fn advance_lap_progress(car: &mut CarState, track: &Track, total_cps: usize, cp_radius: f32) {
+    car.current_lap_ticks += 1;
+
+    let target_cp = car.next_checkpoint;
+    let cp_pos = track.points[target_cp];
+    let entry_dir = if target_cp == 0 {
+        cp_pos - track.points[total_cps - 1]
+    } else {
+        cp_pos - track.points[target_cp - 1]
+    };
+    if (car.pose - cp_pos).length() < cp_radius && car.velocity.dot(entry_dir) > 0.0 {
+        car.last_cleared_checkpoint = target_cp;
+        if target_cp == 0 {
+            // Crossed start/finish having visited all checkpoints in order
+            if car.completed_laps < TOTAL_LAPS {
+                let lap_time = car.current_lap_ticks as f32 * FIXED_DT;
+                car.lap_times[car.completed_laps as usize] = Some(lap_time);
+                car.best_lap_time = Some(match car.best_lap_time {
+                    Some(best) => best.min(lap_time),
+                    None => lap_time,
+                });
+                car.completed_laps += 1;
+                car.current_lap_ticks = 0;
+            }
+            car.next_checkpoint = 1;
+        } else {
+            car.next_checkpoint = (target_cp + 1) % total_cps;
+        }
+    }
+}
+
+/// Computes live race positions from progress scores, returning a 1-indexed
+/// position per car (index-aligned with `cars`). Higher completed laps and
+/// cleared checkpoints rank ahead; closer distance to the next checkpoint
+/// breaks ties.
+fn compute_positions(cars: &[CarState], track: &Track) -> Vec<usize> {
+    let mut car_scores: Vec<(usize, f32)> = cars
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let next_cp = track.points[c.next_checkpoint];
+            let dist_to_next = (c.pose - next_cp).length();
+            let score = c.completed_laps as f32 * 10000.0
+                + c.last_cleared_checkpoint as f32 * 100.0
+                - (dist_to_next / 1000.0);
+            (i, score)
+        })
+        .collect();
+    car_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut positions = vec![1; cars.len()];
+    for (pos_idx, (car_idx, _)) in car_scores.iter().enumerate() {
+        positions[*car_idx] = pos_idx + 1;
+    }
+    positions
 }
 
 fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, bool, bool) {
