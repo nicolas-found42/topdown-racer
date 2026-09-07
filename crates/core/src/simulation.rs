@@ -128,22 +128,28 @@ impl Sim {
 
     /// Builds a sim with an explicit initial `RacePhase`.
     pub fn new_with_phase(track: Track, car_count: usize, phase: RacePhase) -> Sim {
-        let heading = track.points[1] - track.points[0];
-        let heading = heading.y.atan2(heading.x);
         let cars = (0..car_count)
-            .map(|i| CarState {
-                pose: track.spawn_pose(i as f32 * CAR_SPACING),
-                heading,
-                velocity: Vec2::ZERO,
-                reverse: false,
-                standstill_ticks: 0,
-                completed_laps: 0,
-                current_lap_ticks: 0,
-                next_checkpoint: 1,
-                last_cleared_checkpoint: 0,
-                lap_times: [None; TOTAL_LAPS as usize],
-                best_lap_time: None,
-                ai: None,
+            .map(|i| {
+                let pose = track.spawn_pose(i as f32 * CAR_SPACING);
+                // Face each car along the leg it stages on so the grid lines up
+                // with the track instead of starting broadside to it.
+                let seg = track.nearest_segment(pose).segment_index;
+                let dir = track.points[seg + 1] - track.points[seg];
+                let heading = dir.y.atan2(dir.x);
+                CarState {
+                    pose,
+                    heading,
+                    velocity: Vec2::ZERO,
+                    reverse: false,
+                    standstill_ticks: 0,
+                    completed_laps: 0,
+                    current_lap_ticks: 0,
+                    next_checkpoint: 1,
+                    last_cleared_checkpoint: 0,
+                    lap_times: [None; TOTAL_LAPS as usize],
+                    best_lap_time: None,
+                    ai: None,
+                }
             })
             .collect();
         Sim { track, cars, phase }
@@ -878,6 +884,26 @@ mod tests {
             assert!((snap.pose.y - i as f32 * CAR_SPACING).abs() < 1e-4);
             assert!((snap.pose.x).abs() < 1e-4);
             assert_eq!(snap.velocity, Vec2::ZERO);
+        }
+    }
+    #[test]
+    fn spawned_cars_face_their_legs_travel_direction() {
+        let track = straight_track();
+        let mut sim = Sim::new(track, 4);
+        let snaps = sim.tick(&[]);
+        // Lead car sits exactly on the start vertex: faces the opening straight (+x).
+        assert!(
+            (snaps[0].heading - 0.0).abs() < 1e-4,
+            "lead car must face the opening straight (got {})",
+            snaps[0].heading
+        );
+        // Trailing cars sit on the final leg: face its travel direction (south, -y).
+        for (i, snap) in snaps.iter().enumerate().skip(1) {
+            assert!(
+                (snap.heading + std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+                "car {i} must face its leg south (got {})",
+                snap.heading
+            );
         }
     }
 

@@ -416,7 +416,8 @@ fn setup_track(
         if (norm_prev - normal).length() > 0.001 {
             let kerb_w = 0.9;
             let kerb_len = 1.6;
-            // Place kerbs on the inner apex side (+normal side for CCW loop)
+            // Place kerbs on the outer side (-normal side for CCW loop) so they
+            // sit in the runoff instead of overlapping the crossing leg's asphalt.
             // Incoming stretch towards corner
             for step in 0..4 {
                 let d_end = (step as f32) * kerb_len;
@@ -424,10 +425,10 @@ fn setup_track(
                 let pt0 = p0 - dir_prev * d_start;
                 let pt1 = p0 - dir_prev * d_end;
                 let quad = create_quad_mesh(
-                    pt0 + norm_prev * (road_half_w + kerb_w),
-                    pt0 + norm_prev * road_half_w,
-                    pt1 + norm_prev * road_half_w,
-                    pt1 + norm_prev * (road_half_w + kerb_w),
+                    pt0 - norm_prev * (road_half_w + kerb_w),
+                    pt0 - norm_prev * road_half_w,
+                    pt1 - norm_prev * road_half_w,
+                    pt1 - norm_prev * (road_half_w + kerb_w),
                 );
                 let mat = if step % 2 == 0 {
                     kerb_red.clone()
@@ -448,10 +449,10 @@ fn setup_track(
                 let pt0 = p0 + dir * d_start;
                 let pt1 = p0 + dir * d_end;
                 let quad = create_quad_mesh(
-                    pt0 + normal * (road_half_w + kerb_w),
-                    pt0 + normal * road_half_w,
-                    pt1 + normal * road_half_w,
-                    pt1 + normal * (road_half_w + kerb_w),
+                    pt0 - normal * (road_half_w + kerb_w),
+                    pt0 - normal * road_half_w,
+                    pt1 - normal * road_half_w,
+                    pt1 - normal * (road_half_w + kerb_w),
                 );
                 let mat = if step % 2 == 0 {
                     kerb_red.clone()
@@ -488,17 +489,20 @@ fn setup_track(
         });
     }
 
-    // Checkered start/finish line across the track at points[0]
+    // Checkered start/finish line across the opening straight, just past the
+    // corner exit: clear of the crossing leg's asphalt, and the whole grid
+    // stages behind it.
     if n > 0 {
         let dir = seg_dirs[0];
         let normal = seg_normals[0];
+        let line_center = points[0] + dir * (road_half_w + 3.0);
         let checkers_count = 10;
         let checker_w = (road_half_w * 2.0) / checkers_count as f32;
         for row in 0..2 {
             let row_offset = (row as f32 - 0.5) * 0.8;
             for col in 0..checkers_count {
                 let col_offset = -road_half_w + (col as f32 + 0.5) * checker_w;
-                let center = points[0] + dir * row_offset + normal * col_offset;
+                let center = line_center + dir * row_offset + normal * col_offset;
                 let sq = create_quad_mesh(
                     center + dir * 0.4 + normal * (checker_w * 0.5),
                     center + dir * 0.4 - normal * (checker_w * 0.5),
@@ -958,12 +962,12 @@ pub fn format_hud_data(player_snap: &CarSnapshot, total_cars: usize) -> HudData 
 
     let position = format!("POS {}/{}", ordinal(player_snap.position), total_cars);
 
-    let current_lap_time = format!("TIME {}", format_time(player_snap.current_lap_time));
+    let current_lap_time = format!("LAP TIME {}", format_time(player_snap.current_lap_time));
 
     let best_lap_time = format!("BEST {}", format_opt_lap_time(player_snap.best_lap_time));
 
     let speed_val = (player_snap.forward_speed.max(0.0).round()) as u32;
-    let speed = format!("SPEED {}", speed_val);
+    let speed = format!("SPEED {} u/s", speed_val);
 
     HudData {
         lap,
@@ -1050,7 +1054,7 @@ fn setup_hud(mut commands: Commands) {
                     })
                     .with_children(|right| {
                         right.spawn((
-                            TextBundle::from_section("TIME 00:00.00", text_style.clone()),
+                            TextBundle::from_section("LAP TIME 00:00.00", text_style.clone()),
                             HudElement::CurrentTime,
                         ));
                         right.spawn((
@@ -1071,7 +1075,7 @@ fn setup_hud(mut commands: Commands) {
             })
             .with_children(|bottom_bar| {
                 bottom_bar.spawn((
-                    TextBundle::from_section("SPEED 0", text_style.clone()),
+                    TextBundle::from_section("SPEED 0 u/s", text_style.clone()),
                     HudElement::Speed,
                 ));
             });
@@ -1900,9 +1904,9 @@ mod tests {
         let hud = format_hud_data(&snap, 4);
         assert_eq!(hud.lap, "LAP 2/3");
         assert_eq!(hud.position, "POS 1st/4");
-        assert_eq!(hud.current_lap_time, "TIME 00:12.34");
+        assert_eq!(hud.current_lap_time, "LAP TIME 00:12.34");
         assert_eq!(hud.best_lap_time, "BEST 00:18.45");
-        assert_eq!(hud.speed, "SPEED 24");
+        assert_eq!(hud.speed, "SPEED 24 u/s");
     }
 
     #[test]
@@ -1944,7 +1948,7 @@ mod tests {
         assert_eq!(hud_initial.lap, "LAP 1/3");
         assert_eq!(hud_initial.position, "POS 3rd/4");
         assert_eq!(hud_initial.best_lap_time, "BEST --:--.--");
-        assert_eq!(hud_initial.speed, "SPEED 0");
+        assert_eq!(hud_initial.speed, "SPEED 0 u/s");
 
         // Mutate snapshot directly and ensure 1:1 reflection in HUD
         snap.completed_laps = 2;
@@ -1956,9 +1960,9 @@ mod tests {
         let hud_updated = format_hud_data(&snap, 4);
         assert_eq!(hud_updated.lap, "LAP 3/3");
         assert_eq!(hud_updated.position, "POS 2nd/4");
-        assert_eq!(hud_updated.current_lap_time, "TIME 01:05.25");
+        assert_eq!(hud_updated.current_lap_time, "LAP TIME 01:05.25");
         assert_eq!(hud_updated.best_lap_time, "BEST 01:01.80");
-        assert_eq!(hud_updated.speed, "SPEED 32");
+        assert_eq!(hud_updated.speed, "SPEED 32 u/s");
     }
 
     #[test]
