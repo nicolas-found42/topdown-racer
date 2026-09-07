@@ -26,6 +26,26 @@ pub enum Surface {
     Gravel,
 }
 
+/// Contact with a Track boundary wall.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WallContact {
+    /// Inward unit normal pointing away from the wall, back into the track corridor.
+    pub normal: Vec2,
+    /// Distance the Car penetrated beyond the boundary wall.
+    pub penetration: f32,
+}
+
+/// Result of querying the nearest polyline segment to a world position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NearestSegment {
+    /// Index of the polyline segment (`0..points.len() - 1`).
+    pub segment_index: usize,
+    /// Closest point on the segment.
+    pub closest_point: Vec2,
+    /// Distance from the query pose to `closest_point`.
+    pub distance: f32,
+}
+
 impl Surface {
     pub const KNOWN: [Surface; 3] = [Surface::Road, Surface::Grass, Surface::Gravel];
 
@@ -219,6 +239,83 @@ impl Track {
             seg = (seg + segments - 1) % segments;
         }
     }
+
+    /// Half of the full road width: distance from the centerline polyline to
+    /// the outer road edge.
+    pub fn road_half_width(&self) -> f32 {
+        self.width * 0.5
+    }
+
+    /// Distance from the centerline polyline to the Track boundary walls.
+    pub fn wall_distance(&self) -> f32 {
+        self.width
+    }
+
+    /// Finds the closest polyline segment to `pose`.
+    pub fn nearest_segment(&self, pose: Vec2) -> NearestSegment {
+        let segment_count = self.points.len() - 1;
+        let mut best_seg = 0;
+        let mut best_point = self.points[0];
+        let mut best_dist_sq = f32::INFINITY;
+
+        for i in 0..segment_count {
+            let a = self.points[i];
+            let b = self.points[i + 1];
+            let ab = b - a;
+            let len_sq = ab.length_squared();
+            let t = if len_sq > 0.0 {
+                ((pose - a).dot(ab) / len_sq).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let candidate = a + ab * t;
+            let dist_sq = pose.distance_squared(candidate);
+            if dist_sq < best_dist_sq {
+                best_dist_sq = dist_sq;
+                best_point = candidate;
+                best_seg = i;
+            }
+        }
+
+        NearestSegment {
+            segment_index: best_seg,
+            closest_point: best_point,
+            distance: best_dist_sq.sqrt(),
+        }
+    }
+
+    /// Samples the Track surface at `pose`. If within `road_half_width()` of
+    /// the polyline centerline, returns the segment's authored surface.
+    /// Outside the road corridor, returns off-track [`Surface::Grass`].
+    pub fn sample_surface(&self, pose: Vec2) -> Surface {
+        let nearest = self.nearest_segment(pose);
+        if nearest.distance <= self.road_half_width() {
+            self.surfaces[nearest.segment_index]
+        } else {
+            Surface::Grass
+        }
+    }
+
+    /// Checks if `pose` has reached or penetrated a Track boundary wall.
+    /// If so, returns a [`WallContact`] with the inward normal and penetration depth.
+    pub fn wall_contact(&self, pose: Vec2) -> Option<WallContact> {
+        let nearest = self.nearest_segment(pose);
+        let wall_dist = self.wall_distance();
+        if nearest.distance > wall_dist {
+            let penetration = nearest.distance - wall_dist;
+            let normal = if nearest.distance > 1e-6 {
+                (nearest.closest_point - pose) / nearest.distance
+            } else {
+                Vec2::ZERO
+            };
+            Some(WallContact {
+                normal,
+                penetration,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -380,5 +477,63 @@ mod tests {
             assert!(msg.contains("malformed track text"), "message: {msg}");
             assert!(msg.contains("line 1"), "message: {msg}");
         }
+    }
+
+    #[test]
+    fn surface_sampling_identifies_road_gravel_and_off_track_grass() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        // Road half-width is 7.0 (width is 14.0).
+        assert_eq!(track.road_half_width(), 7.0);
+
+        // Segment 0 is Road: (0,0) -> (120,0).
+        // On centerline:
+        assert_eq!(track.sample_surface(Vec2::new(50.0, 0.0)), Surface::Road);
+        // Within road half-width (y = 5.0 <= 7.0):
+        assert_eq!(track.sample_surface(Vec2::new(50.0, 5.0)), Surface::Road);
+        assert_eq!(track.sample_surface(Vec2::new(50.0, -6.5)), Surface::Road);
+
+        // Segment 2 is Gravel: (160,30) -> (160,90).
+        // Within road half-width on gravel segment:
+        assert_eq!(
+            track.sample_surface(Vec2::new(160.0, 60.0)),
+            Surface::Gravel
+        );
+        assert_eq!(
+            track.sample_surface(Vec2::new(164.0, 60.0)),
+            Surface::Gravel
+        );
+
+        // Off-road (distance > 7.0) is always off-track Grass:
+        // Beyond road edge on segment 0 (y = 9.0 > 7.0):
+        assert_eq!(track.sample_surface(Vec2::new(50.0, 9.0)), Surface::Grass);
+        assert_eq!(track.sample_surface(Vec2::new(50.0, -10.0)), Surface::Grass);
+        // Beyond road edge on gravel segment (x = 170.0, distance 10.0 > 7.0):
+        assert_eq!(track.sample_surface(Vec2::new(170.0, 60.0)), Surface::Grass);
+    }
+
+    #[test]
+    fn wall_contact_detects_boundary_penetration_and_inward_normal() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        // Wall distance is 14.0 (equal to track.width).
+        assert_eq!(track.wall_distance(), 14.0);
+
+        // Within wall boundary: no wall contact.
+        assert!(track.wall_contact(Vec2::new(50.0, 0.0)).is_none());
+        assert!(track.wall_contact(Vec2::new(50.0, 7.0)).is_none());
+        assert!(track.wall_contact(Vec2::new(50.0, 13.9)).is_none());
+
+        // Contact at y = 16.0 on segment 0 (centerline y=0, wall at y=14.0):
+        // Penetration is 2.0; inward normal points down towards track centerline (0, -1).
+        let contact = track.wall_contact(Vec2::new(50.0, 16.0)).unwrap();
+        assert!((contact.penetration - 2.0).abs() < 1e-4);
+        assert!((contact.normal.x).abs() < 1e-4);
+        assert!((contact.normal.y - (-1.0)).abs() < 1e-4);
+
+        // Contact on the other side (y = -18.0):
+        // Penetration is 4.0; inward normal points up (0, 1).
+        let contact_other = track.wall_contact(Vec2::new(50.0, -18.0)).unwrap();
+        assert!((contact_other.penetration - 4.0).abs() < 1e-4);
+        assert!((contact_other.normal.x).abs() < 1e-4);
+        assert!((contact_other.normal.y - 1.0).abs() < 1e-4);
     }
 }

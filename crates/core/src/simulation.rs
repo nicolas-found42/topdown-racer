@@ -4,7 +4,7 @@
 
 use glam::Vec2;
 
-use crate::track::Track;
+use crate::track::{Surface, Track};
 
 /// Fixed simulation rate in steps per second.
 pub const FIXED_HZ: f32 = 64.0;
@@ -45,6 +45,10 @@ pub struct CarSnapshot {
     pub velocity: Vec2,
     /// Signed speed along the Car's heading; negative while reversing.
     pub forward_speed: f32,
+    /// Surface the Car is currently driving on.
+    pub surface: Surface,
+    /// Whether the Car contacted a boundary wall during this tick.
+    pub wall_contact: bool,
 }
 
 /// The headless world: Cars advancing over a Track at the fixed step.
@@ -93,25 +97,60 @@ impl Sim {
             .enumerate()
             .map(|(i, car)| {
                 let input = inputs.get(i).copied().unwrap_or_default();
-                step_car(car, input);
+                let (surface, wall_contact) = step_car(car, input, &self.track);
                 CarSnapshot {
                     pose: car.pose,
                     heading: car.heading,
                     velocity: car.velocity,
                     forward_speed: car.velocity.dot(forward(car.heading)),
+                    surface,
+                    wall_contact,
                 }
             })
             .collect()
     }
 }
 
-fn step_car(car: &mut CarState, input: CarInput) {
+/// Drag, rolling resistance, and traction modifiers for a Track surface.
+struct SurfacePhysics {
+    drag_factor: f32,
+    rolling_factor: f32,
+    traction_factor: f32,
+}
+
+impl SurfacePhysics {
+    fn for_surface(surface: Surface) -> Self {
+        match surface {
+            Surface::Road => SurfacePhysics {
+                drag_factor: 1.0,
+                rolling_factor: 1.0,
+                traction_factor: 1.0,
+            },
+            Surface::Gravel => SurfacePhysics {
+                drag_factor: 1.3,
+                rolling_factor: 1.6,
+                traction_factor: 0.75,
+            },
+            Surface::Grass => SurfacePhysics {
+                drag_factor: 1.8,
+                rolling_factor: 3.0,
+                traction_factor: 0.5,
+            },
+        }
+    }
+}
+
+fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, bool) {
+    let initial_surface = track.sample_surface(car.pose);
+    let physics = SurfacePhysics::for_surface(initial_surface);
+
     let fwd = forward(car.heading);
     let left = Vec2::new(-fwd.y, fwd.x);
     let mut vf = car.velocity.dot(fwd);
     let vl = car.velocity.dot(left);
 
-    let drag = DRAG_COEFF * vf * vf.abs() + ROLLING_RESIST * vf;
+    let drag = (DRAG_COEFF * physics.drag_factor) * vf * vf.abs()
+        + (ROLLING_RESIST * physics.rolling_factor) * vf;
 
     if !car.reverse {
         if vf.abs() < STANDSTILL_THRESHOLD && input.throttle <= 0.0 {
@@ -127,8 +166,8 @@ fn step_car(car: &mut CarState, input: CarInput) {
             }
         } else {
             car.standstill_ticks = 0;
-            let drive = input.throttle * ENGINE_ACCEL;
-            let brake = input.brake * BRAKE_ACCEL;
+            let drive = input.throttle * ENGINE_ACCEL * physics.traction_factor;
+            let brake = input.brake * BRAKE_ACCEL * physics.traction_factor;
 
             let accel = drive - drag - brake;
             vf += accel * FIXED_DT;
@@ -143,8 +182,8 @@ fn step_car(car: &mut CarState, input: CarInput) {
             car.reverse = false;
             car.standstill_ticks = 0;
         } else {
-            let reverse_drive = -input.brake * REVERSE_ACCEL;
-            let throttle_brake = input.throttle * BRAKE_ACCEL;
+            let reverse_drive = -input.brake * REVERSE_ACCEL * physics.traction_factor;
+            let throttle_brake = input.throttle * BRAKE_ACCEL * physics.traction_factor;
 
             let accel = reverse_drive - drag + throttle_brake;
             vf += accel * FIXED_DT;
@@ -169,6 +208,27 @@ fn step_car(car: &mut CarState, input: CarInput) {
     let left = Vec2::new(-fwd.y, fwd.x);
     car.velocity = fwd * vf + left * vl;
     car.pose += car.velocity * FIXED_DT;
+
+    // Wall collision response: bounce with speed loss and inward reflection.
+    let wall_contact = if let Some(contact) = track.wall_contact(car.pose) {
+        car.pose += contact.normal * contact.penetration;
+
+        let vn = car.velocity.dot(contact.normal);
+        let v_norm = contact.normal * vn;
+        let v_tangent = car.velocity - v_norm;
+
+        let reflected_vn = if vn < 0.0 { -WALL_RESTITUTION * vn } else { vn };
+        let damped_vt = v_tangent * WALL_FRICTION;
+        car.velocity = damped_vt + contact.normal * reflected_vn;
+
+        true
+    } else {
+        false
+    };
+
+    // Sample surface at post-move pose so CarSnapshot matches the final pose.
+    let post_surface = track.sample_surface(car.pose);
+    (post_surface, wall_contact)
 }
 
 /// Unit vector along a heading (0 faces +x, positive is counter-clockwise).
@@ -198,6 +258,10 @@ const STANDSTILL_REVERSE_TICKS: u32 = 16;
 const MAX_ANGULAR_VEL: f32 = 3.2;
 /// Steering sensitivity factor translating forward speed and steer input into angular velocity.
 const STEER_SENSITIVITY: f32 = 0.15;
+/// Coefficient of restitution for boundary wall collisions (normal velocity bounce).
+const WALL_RESTITUTION: f32 = 0.4;
+/// Tangential friction coefficient during boundary wall collisions.
+const WALL_FRICTION: f32 = 0.75;
 
 #[cfg(test)]
 mod tests {
@@ -468,5 +532,226 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn leaving_the_road_measurably_slows_the_car_versus_staying_on_it() {
+        let track = straight_track();
+        let mut sim_road = Sim::new(track.clone(), 1);
+        let mut sim_grass = Sim::new(track, 1);
+
+        // Both cars accelerate down the straight for 80 ticks to build speed and
+        // clear the start corner (x > 25).
+        let setup = vec![hold(1.0, 0.0, 0.0); 80];
+        for input in &setup {
+            sim_road.tick(&[*input]);
+            sim_grass.tick(&[*input]);
+        }
+
+        // Car on road continues straight under full throttle for 120 ticks.
+        let road_snaps = {
+            let mut s = Vec::new();
+            for _ in 0..120 {
+                s.extend(sim_road.tick(&[hold(1.0, 0.0, 0.0)]));
+            }
+            s
+        };
+        // Car B steers off the road into grass (road half-width = 10.0),
+        // straightens out, and continues under full throttle for 100 ticks.
+        let mut grass_snaps = Vec::new();
+        for _ in 0..50 {
+            grass_snaps.extend(sim_grass.tick(&[hold(1.0, 0.0, 0.8)]));
+        }
+        for _ in 0..40 {
+            grass_snaps.extend(sim_grass.tick(&[hold(1.0, 0.0, -0.6)]));
+        }
+        for _ in 0..100 {
+            grass_snaps.extend(sim_grass.tick(&[hold(1.0, 0.0, 0.0)]));
+        }
+        let final_road = road_snaps.last().unwrap();
+        let final_grass = grass_snaps.last().unwrap();
+        // Confirm surfaces:
+        assert_eq!(final_road.surface, Surface::Road);
+        assert_eq!(final_grass.surface, Surface::Grass);
+        assert!(
+            final_grass.pose.y.abs() > 10.0,
+            "car must be off-road: y={}",
+            final_grass.pose.y
+        );
+
+        // Leaving the road measurably slows the Car versus staying on it:
+        // Car on road has much higher speed and covered much more distance.
+        assert!(
+            final_road.forward_speed > final_grass.forward_speed * 1.5,
+            "road speed {} must exceed grass speed {} by > 50%",
+            final_road.forward_speed,
+            final_grass.forward_speed
+        );
+        assert!(
+            final_road.pose.x > final_grass.pose.x * 1.3,
+            "road x {} must exceed grass x {}",
+            final_road.pose.x,
+            final_grass.pose.x
+        );
+    }
+
+    #[test]
+    fn wall_contact_bleeds_speed_and_reflects_the_car_without_hard_stopping() {
+        let track = straight_track();
+        let mut sim = Sim::new(track, 1);
+
+        // Accelerate straight down the road first, then steer towards the outside wall at y = -20.0.
+        let mut hit_tick = None;
+        let mut prev_snap = None;
+        let mut contact_snap = None;
+
+        // 40 ticks straight to build speed.
+        for _ in 0..40 {
+            let snaps = sim.tick(&[hold(1.0, 0.0, 0.0)]);
+            prev_snap = Some(snaps[0]);
+        }
+
+        // Next 35 ticks: turn heading towards negative y wall.
+        for tick in 40..75 {
+            let snaps = sim.tick(&[hold(1.0, 0.0, -0.6)]);
+            let snap = snaps[0];
+            if snap.wall_contact {
+                hit_tick = Some(tick);
+                contact_snap = Some(snap);
+                break;
+            }
+            prev_snap = Some(snap);
+        }
+
+        // Next ticks: drive straight into the wall at y = -20.0.
+        if hit_tick.is_none() {
+            for tick in 75..200 {
+                let snaps = sim.tick(&[hold(1.0, 0.0, 0.0)]);
+                let snap = snaps[0];
+                if snap.wall_contact {
+                    hit_tick = Some(tick);
+                    contact_snap = Some(snap);
+                    break;
+                }
+                prev_snap = Some(snap);
+            }
+        }
+
+        assert!(hit_tick.is_some(), "car must hit the wall");
+        let prev = prev_snap.unwrap();
+        let contact = contact_snap.unwrap();
+
+        // Speed before contact vs speed after contact:
+        let speed_before = prev.velocity.length();
+        let speed_after = contact.velocity.length();
+
+        // 1. Bleeds speed:
+        assert!(
+            speed_after < speed_before,
+            "wall contact must bleed speed: after {speed_after} < before {speed_before}"
+        );
+
+        // 2. Without hard-stopping:
+        assert!(
+            speed_after > 1.0,
+            "wall contact must not hard-stop: speed after was {speed_after}"
+        );
+
+        // 3. Reflects the Car: velocity normal to wall (y component heading towards negative y wall)
+        // must reverse direction away from the wall (become positive).
+        assert!(
+            prev.velocity.y < 0.0,
+            "must have been moving towards negative y wall"
+        );
+        assert!(
+            contact.velocity.y > 0.0,
+            "velocity must be reflected back inward (got {})",
+            contact.velocity.y
+        );
+
+        // 4. Car stays within wall boundary (y >= -20.0):
+        assert!(
+            contact.pose.y >= -20.0 - 1e-3,
+            "car must not penetrate past wall: got {}",
+            contact.pose.y
+        );
+    }
+
+    #[test]
+    fn scripted_lap_of_sample_circuit_completes_cleanly() {
+        use crate::track::SAMPLE_CIRCUIT;
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new(track, 1);
+
+        let waypoints = [
+            Vec2::new(120.0, 0.0),
+            Vec2::new(160.0, 30.0),
+            Vec2::new(160.0, 90.0),
+            Vec2::new(110.0, 120.0),
+            Vec2::new(40.0, 120.0),
+            Vec2::new(0.0, 90.0),
+            Vec2::new(0.0, 0.0),
+        ];
+
+        let mut last_pose = Vec2::new(0.0, 0.0);
+        let mut last_heading = 0.0;
+        let mut current_wp = 0;
+        let mut observed_gravel = false;
+        let mut total_wall_contacts = 0;
+        let mut completed_lap = false;
+        let mut final_snap = None;
+
+        // Drive up to 1500 ticks (~23.4 seconds).
+        for _tick in 0..1500 {
+            let target = waypoints[current_wp];
+            let to_target = target - last_pose;
+            let target_angle = to_target.y.atan2(to_target.x);
+            let mut angle_diff = target_angle - last_heading;
+            while angle_diff > std::f32::consts::PI {
+                angle_diff -= 2.0 * std::f32::consts::PI;
+            }
+            while angle_diff < -std::f32::consts::PI {
+                angle_diff += 2.0 * std::f32::consts::PI;
+            }
+
+            let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
+            let throttle = if angle_diff.abs() > 0.4 { 0.4 } else { 1.0 };
+            let brake = if angle_diff.abs() > 0.8 { 0.3 } else { 0.0 };
+
+            let snaps = sim.tick(&[CarInput {
+                throttle,
+                brake,
+                steer,
+            }]);
+            let snap = snaps[0];
+            last_pose = snap.pose;
+            last_heading = snap.heading;
+            final_snap = Some(snap);
+
+            if snap.surface == Surface::Gravel {
+                observed_gravel = true;
+            }
+            if snap.wall_contact {
+                total_wall_contacts += 1;
+            }
+
+            if (target - snap.pose).length() < 14.0 {
+                current_wp += 1;
+                if current_wp >= waypoints.len() {
+                    completed_lap = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(completed_lap, "must complete the lap within 1500 ticks");
+        assert!(observed_gravel, "must traverse gravel surface segments");
+        assert_eq!(total_wall_contacts, 0, "clean lap should not contact walls");
+        let last = final_snap.unwrap();
+        assert!(
+            last.pose.distance(Vec2::new(0.0, 0.0)) < 15.0,
+            "final pose must be near start/finish line: got {:?}",
+            last.pose
+        );
     }
 }
