@@ -1638,5 +1638,27 @@ mod tests {
             observed_gravel,
             "AI cars must drive across authored track surfaces like Gravel"
         );
+
+        // 3. AI car wall collision: stage AI Car 2 colliding into the boundary wall
+        // Segment 0 runs along y = 0.0 with wall_distance = 14.0 (outer wall at y = -14.0).
+        sim_circuit.cars[2].pose = Vec2::new(60.0, -13.95);
+        sim_circuit.cars[2].velocity = Vec2::new(0.0, -10.0);
+        sim_circuit.cars[2].heading = -std::f32::consts::FRAC_PI_2;
+
+        let v_before_wall = sim_circuit.cars[2].velocity.length();
+        let snap_wall = sim_circuit.tick(&[CarInput::default()])[2];
+
+        assert!(
+            snap_wall.wall_contact,
+            "AI car must trigger wall_contact upon boundary collision"
+        );
+        assert!(
+            snap_wall.velocity.length() < v_before_wall,
+            "AI car must bleed speed upon wall impact"
+        );
+        assert!(
+            snap_wall.velocity.y > 0.0,
+            "AI car normal velocity must reflect off wall"
+        );
     }
 }
