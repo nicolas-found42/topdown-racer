@@ -37,6 +37,23 @@ impl Default for CarInput {
     }
 }
 
+/// Standard race length in completed laps.
+pub const TOTAL_LAPS: u32 = 3;
+
+/// Default countdown duration in ticks (3.0 seconds at 64 Hz).
+pub const DEFAULT_COUNTDOWN_TICKS: u32 = 192;
+
+/// The high-level phase of a Race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RacePhase {
+    /// Fixed-tick countdown before racing begins. Controls are locked.
+    Countdown { ticks_remaining: u32 },
+    /// Active racing across 3 laps.
+    Racing,
+    /// The race has concluded (all laps completed).
+    Finished,
+}
+
 /// One Car's externally observable state after a tick.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CarSnapshot {
@@ -54,12 +71,25 @@ pub struct CarSnapshot {
     pub wall_contact: bool,
     /// Whether the Car is currently in a controlled Drift state.
     pub drifting: bool,
+    /// Current phase of the Race.
+    pub phase: RacePhase,
+    /// Number of fully completed laps (0..=3).
+    pub completed_laps: u32,
+    /// Recorded elapsed times in seconds for completed laps [lap 1, lap 2, lap 3].
+    pub lap_times: [Option<f32>; TOTAL_LAPS as usize],
+    /// Elapsed time in seconds during the current in-progress lap.
+    pub current_lap_time: f32,
+    /// Best completed lap time in seconds, if at least one lap has been finished.
+    pub best_lap_time: Option<f32>,
+    /// Live race position (1st, 2nd, 3rd, 4th; 1-indexed).
+    pub position: usize,
 }
 
 /// The headless world: Cars advancing over a Track at the fixed step.
 pub struct Sim {
     track: Track,
     cars: Vec<CarState>,
+    phase: RacePhase,
 }
 
 struct CarState {
@@ -68,12 +98,34 @@ struct CarState {
     velocity: Vec2,
     reverse: bool,
     standstill_ticks: u32,
+    completed_laps: u32,
+    current_lap_ticks: u32,
+    next_checkpoint: usize,
+    last_cleared_checkpoint: usize,
+    lap_times: [Option<f32>; TOTAL_LAPS as usize],
+    best_lap_time: Option<f32>,
 }
 
 impl Sim {
     /// Builds a sim with `car_count` Cars staged behind the Track's start
-    /// line, all facing along the first polyline segment.
+    /// line, starting in the `Racing` phase.
     pub fn new(track: Track, car_count: usize) -> Sim {
+        Self::new_with_phase(track, car_count, RacePhase::Racing)
+    }
+
+    /// Builds a full race sim starting in the `Countdown` phase.
+    pub fn new_race(track: Track, car_count: usize) -> Sim {
+        Self::new_with_phase(
+            track,
+            car_count,
+            RacePhase::Countdown {
+                ticks_remaining: DEFAULT_COUNTDOWN_TICKS,
+            },
+        )
+    }
+
+    /// Builds a sim with an explicit initial `RacePhase`.
+    pub fn new_with_phase(track: Track, car_count: usize, phase: RacePhase) -> Sim {
         let heading = track.points[1] - track.points[0];
         let heading = heading.y.atan2(heading.x);
         let cars = (0..car_count)
@@ -83,9 +135,15 @@ impl Sim {
                 velocity: Vec2::ZERO,
                 reverse: false,
                 standstill_ticks: 0,
+                completed_laps: 0,
+                current_lap_ticks: 0,
+                next_checkpoint: 1,
+                last_cleared_checkpoint: 0,
+                lap_times: [None; TOTAL_LAPS as usize],
+                best_lap_time: None,
             })
             .collect();
-        Sim { track, cars }
+        Sim { track, cars, phase }
     }
 
     /// The parsed Track this sim runs on.
@@ -93,16 +151,112 @@ impl Sim {
         &self.track
     }
 
+    /// Current phase of the Race.
+    pub fn phase(&self) -> RacePhase {
+        self.phase
+    }
+
+    /// Puts the simulation into a countdown with the specified number of ticks.
+    pub fn start_countdown(&mut self, ticks: u32) {
+        self.phase = RacePhase::Countdown {
+            ticks_remaining: ticks,
+        };
+    }
+
     /// Advances the world one fixed step from the given per-Car inputs (in
     /// spawn order; missing inputs fall back to neutral) and returns one
     /// snapshot per Car.
     pub fn tick(&mut self, inputs: &[CarInput]) -> Vec<CarSnapshot> {
+        // Phase management: countdown progression
+        let controls_locked = match &mut self.phase {
+            RacePhase::Countdown { ticks_remaining } => {
+                if *ticks_remaining > 1 {
+                    *ticks_remaining -= 1;
+                } else {
+                    self.phase = RacePhase::Racing;
+                }
+                true
+            }
+            RacePhase::Racing | RacePhase::Finished => false,
+        };
+
+        let total_cps = (self.track.points.len() - 1).max(1);
+        let cp_radius = self.track.wall_distance() * 1.5;
+
+        // Step all cars
+        let mut step_results = Vec::with_capacity(self.cars.len());
+        for (i, car) in self.cars.iter_mut().enumerate() {
+            let raw_input = inputs.get(i).copied().unwrap_or_default();
+            let effective_input = if controls_locked {
+                CarInput::default()
+            } else {
+                raw_input
+            };
+
+            let (surface, wall_contact, drifting) = step_car(car, effective_input, &self.track);
+            step_results.push((surface, wall_contact, drifting));
+
+            // In Racing phase, accumulate lap time and check ordered progress
+            if self.phase == RacePhase::Racing {
+                car.current_lap_ticks += 1;
+
+                let target_cp = car.next_checkpoint;
+                let cp_pos = self.track.points[target_cp];
+                if (car.pose - cp_pos).length() < cp_radius {
+                    car.last_cleared_checkpoint = target_cp;
+                    if target_cp == 0 {
+                        // Crossed start/finish having visited all checkpoints in order
+                        if car.completed_laps < TOTAL_LAPS {
+                            let lap_time = car.current_lap_ticks as f32 * FIXED_DT;
+                            car.lap_times[car.completed_laps as usize] = Some(lap_time);
+                            car.best_lap_time = Some(match car.best_lap_time {
+                                Some(best) => best.min(lap_time),
+                                None => lap_time,
+                            });
+                            car.completed_laps += 1;
+                            car.current_lap_ticks = 0;
+                        }
+                        car.next_checkpoint = 1;
+                    } else {
+                        car.next_checkpoint = (target_cp + 1) % total_cps;
+                    }
+                }
+            }
+        }
+
+        // If any car completed all laps, the race transitions to Finished
+        if self.phase == RacePhase::Racing
+            && self.cars.iter().any(|c| c.completed_laps >= TOTAL_LAPS)
+        {
+            self.phase = RacePhase::Finished;
+        }
+
+        // Calculate live positions: sorted by progress score
+        let mut car_scores: Vec<(usize, f32)> = self
+            .cars
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let next_cp = self.track.points[c.next_checkpoint];
+                let dist_to_next = (c.pose - next_cp).length();
+                let score = c.completed_laps as f32 * 10000.0
+                    + c.last_cleared_checkpoint as f32 * 100.0
+                    - (dist_to_next / 1000.0);
+                (i, score)
+            })
+            .collect();
+        car_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut positions = vec![1; self.cars.len()];
+        for (pos_idx, (car_idx, _)) in car_scores.iter().enumerate() {
+            positions[*car_idx] = pos_idx + 1;
+        }
+
+        // Build final snapshots
         self.cars
-            .iter_mut()
+            .iter()
             .enumerate()
             .map(|(i, car)| {
-                let input = inputs.get(i).copied().unwrap_or_default();
-                let (surface, wall_contact, drifting) = step_car(car, input, &self.track);
+                let (surface, wall_contact, drifting) = step_results[i];
                 CarSnapshot {
                     pose: car.pose,
                     heading: car.heading,
@@ -111,6 +265,12 @@ impl Sim {
                     surface,
                     wall_contact,
                     drifting,
+                    phase: self.phase,
+                    completed_laps: car.completed_laps,
+                    lap_times: car.lap_times,
+                    current_lap_time: car.current_lap_ticks as f32 * FIXED_DT,
+                    best_lap_time: car.best_lap_time,
+                    position: positions[i],
                 }
             })
             .collect()
@@ -338,7 +498,7 @@ const HANDBRAKE_DRIFT_SLIP_MIN: f32 = 0.4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::track::Surface;
+    use crate::track::{Surface, SAMPLE_CIRCUIT};
 
     /// A long rectangular loop so a test Car has kilometers of open Road in
     /// front of it; spawn faces +x along the first segment.
@@ -984,5 +1144,187 @@ mod tests {
                 snap.forward_speed
             );
         }
+    }
+
+    #[test]
+    fn scripted_drive_of_sample_circuit_completes_laps_with_recorded_times() {
+        let text = SAMPLE_CIRCUIT;
+        let track = Track::parse(text).unwrap();
+        let mut sim = Sim::new(track.clone(), 1);
+
+        let waypoints = &track.points[..track.points.len() - 1];
+        let mut current_wp = 1;
+        let mut last_pose = sim.cars[0].pose;
+        let mut last_heading = sim.cars[0].heading;
+        let mut completed_lap_snap = None;
+
+        // Drive for up to 1800 ticks
+        for _ in 0..1800 {
+            let target = waypoints[current_wp];
+            let to_target = target - last_pose;
+            let target_angle = to_target.y.atan2(to_target.x);
+            let mut angle_diff = target_angle - last_heading;
+            while angle_diff > std::f32::consts::PI {
+                angle_diff -= 2.0 * std::f32::consts::PI;
+            }
+            while angle_diff < -std::f32::consts::PI {
+                angle_diff += 2.0 * std::f32::consts::PI;
+            }
+
+            let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
+            let throttle = if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 };
+            let brake = if angle_diff.abs() > 0.8 { 0.3 } else { 0.0 };
+
+            let snap = sim.tick(&[CarInput {
+                throttle,
+                brake,
+                steer,
+                handbrake: false,
+            }])[0];
+            last_pose = snap.pose;
+            last_heading = snap.heading;
+
+            if snap.completed_laps >= 1 {
+                completed_lap_snap = Some(snap);
+                break;
+            }
+
+            if (target - snap.pose).length() < 14.0 {
+                current_wp = (current_wp + 1) % waypoints.len();
+            }
+        }
+
+        let snap = completed_lap_snap.expect("must complete at least 1 lap");
+        assert_eq!(snap.completed_laps, 1);
+        assert!(snap.lap_times[0].is_some(), "lap time 1 must be recorded");
+        let t1 = snap.lap_times[0].unwrap();
+        assert!(
+            t1 > 5.0 && t1 < 30.0,
+            "lap time should be realistic: got {t1}"
+        );
+        assert_eq!(snap.best_lap_time, Some(t1));
+    }
+
+    #[test]
+    fn cut_attempts_and_wrong_way_progress_never_increment_the_lap_counter() {
+        let text = SAMPLE_CIRCUIT;
+        let track = Track::parse(text).unwrap();
+        let mut sim = Sim::new(track.clone(), 1);
+
+        // Reversal: drive backwards through the start line for 300 ticks
+        for _ in 0..300 {
+            let snap = sim.tick(&[CarInput {
+                throttle: 0.0,
+                brake: 1.0,
+                steer: 0.0,
+                handbrake: false,
+            }])[0];
+            assert_eq!(
+                snap.completed_laps, 0,
+                "wrong-way reverse progress must never increment lap counter"
+            );
+        }
+
+        // Infield cut attempt: start fresh, drive forward 30 ticks, steer sharply left across infield to (0,0)
+        let mut sim_cut = Sim::new(track, 1);
+        for _ in 0..30 {
+            sim_cut.tick(&[hold(1.0, 0.0, 0.0)]);
+        }
+        // Steer left cutting across infield
+        for _ in 0..80 {
+            sim_cut.tick(&[hold(1.0, 0.0, 1.0)]);
+        }
+        // Drive straight back to start/finish line
+        for _ in 0..200 {
+            let snap = sim_cut.tick(&[hold(1.0, 0.0, 0.0)])[0];
+            assert_eq!(
+                snap.completed_laps, 0,
+                "infield cut attempt must never increment lap counter"
+            );
+        }
+    }
+
+    #[test]
+    fn race_phases_transition_countdown_racing_finished_across_three_laps() {
+        let text = SAMPLE_CIRCUIT;
+        let track = Track::parse(text).unwrap();
+        let mut sim = Sim::new(track.clone(), 1);
+        sim.start_countdown(16);
+
+        // 1. Countdown phase: controls locked, speed stays 0
+        for tick in 0..15 {
+            let snap = sim.tick(&[hold(1.0, 0.0, 0.0)])[0];
+            assert_eq!(
+                snap.phase,
+                RacePhase::Countdown {
+                    ticks_remaining: 15 - tick
+                }
+            );
+            assert_eq!(
+                snap.forward_speed, 0.0,
+                "controls must be locked during countdown"
+            );
+        }
+
+        // 2. Transition to Racing at tick 16
+        let snap = sim.tick(&[hold(1.0, 0.0, 0.0)])[0];
+        assert_eq!(
+            snap.phase,
+            RacePhase::Racing,
+            "must transition to Racing phase"
+        );
+
+        // 3. Drive 3 complete laps and observe Finished phase
+        let waypoints = &track.points[..track.points.len() - 1];
+        let mut current_wp = 1;
+        let mut last_pose = snap.pose;
+        let mut last_heading = snap.heading;
+        let mut final_snap = None;
+
+        for _ in 0..5000 {
+            let target = waypoints[current_wp];
+            let to_target = target - last_pose;
+            let target_angle = to_target.y.atan2(to_target.x);
+            let mut angle_diff = target_angle - last_heading;
+            while angle_diff > std::f32::consts::PI {
+                angle_diff -= 2.0 * std::f32::consts::PI;
+            }
+            while angle_diff < -std::f32::consts::PI {
+                angle_diff += 2.0 * std::f32::consts::PI;
+            }
+
+            let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
+            let throttle = if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 };
+            let brake = if angle_diff.abs() > 0.8 { 0.3 } else { 0.0 };
+
+            let snap = sim.tick(&[CarInput {
+                throttle,
+                brake,
+                steer,
+                handbrake: false,
+            }])[0];
+            last_pose = snap.pose;
+            last_heading = snap.heading;
+            final_snap = Some(snap);
+
+            if snap.phase == RacePhase::Finished {
+                break;
+            }
+
+            if (target - snap.pose).length() < 14.0 {
+                current_wp = (current_wp + 1) % waypoints.len();
+            }
+        }
+
+        let last = final_snap.expect("simulation must produce snapshots");
+        assert_eq!(last.completed_laps, TOTAL_LAPS, "must complete 3 laps");
+        assert_eq!(
+            last.phase,
+            RacePhase::Finished,
+            "must transition to Finished phase after 3 laps"
+        );
+        assert!(last.lap_times[0].is_some());
+        assert!(last.lap_times[1].is_some());
+        assert!(last.lap_times[2].is_some());
     }
 }
