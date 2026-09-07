@@ -174,6 +174,7 @@ impl Plugin for RacerGamePlugin {
             .add_systems(Startup, (setup_camera, setup_track, setup_car, setup_hud))
             .add_systems(OnEnter(AppState::Menu), (spawn_menu_ui, hide_hud))
             .add_systems(OnExit(AppState::Menu), despawn_screens)
+            .add_systems(OnEnter(AppState::Race), (reset_race_on_enter, show_hud))
             .add_systems(
                 OnEnter(AppState::Results),
                 (spawn_results_ui, hide_hud, persist_best_lap_on_finish),
