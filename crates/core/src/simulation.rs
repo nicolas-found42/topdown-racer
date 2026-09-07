@@ -1237,21 +1237,42 @@ mod tests {
     fn cut_attempts_and_wrong_way_progress_never_increment_the_lap_counter() {
         let text = SAMPLE_CIRCUIT;
         let track = Track::parse(text).unwrap();
-        let mut sim = Sim::new(track.clone(), 1);
 
-        // Reversal: drive backwards through the start line for 300 ticks
-        for _ in 0..300 {
-            let snap = sim.tick(&[CarInput {
-                throttle: 0.0,
-                brake: 1.0,
-                steer: 0.0,
-                handbrake: false,
-            }])[0];
+        // Reversal / wrong-way driving: turn 180 degrees around and drive the circuit in reverse order:
+        // 7 -> 6 -> 5 -> 4 -> 3 -> 2 -> 1 -> 0.
+        let mut sim_reverse = Sim::new(track.clone(), 1);
+        sim_reverse.cars[0].heading += std::f32::consts::PI;
+
+        let reverse_waypoints: Vec<Vec2> = (0..track.points.len() - 1)
+            .rev()
+            .map(|idx| track.points[idx])
+            .collect();
+        let mut current_wp = 0;
+        let mut last_pose = sim_reverse.cars[0].pose;
+        let mut last_heading = sim_reverse.cars[0].heading;
+        let mut traversed_wrong_way = false;
+
+        for _ in 0..2000 {
+            let snap = drive_step_towards_waypoints(
+                &mut sim_reverse,
+                &reverse_waypoints,
+                &mut current_wp,
+                &mut last_pose,
+                &mut last_heading,
+            );
             assert_eq!(
                 snap.completed_laps, 0,
-                "wrong-way reverse progress must never increment lap counter"
+                "wrong-way progress must never increment lap counter"
             );
+            // When current_wp cycles through the reverse waypoints back to 0, it has traversed the track wrong-way
+            if current_wp > 5 {
+                traversed_wrong_way = true;
+            }
         }
+        assert!(
+            traversed_wrong_way,
+            "car must actually traverse the circuit in the wrong direction"
+        );
 
         // Infield cut attempt: start fresh, drive forward 30 ticks, steer sharply left across infield to (0,0)
         let mut sim_cut = Sim::new(track, 1);
