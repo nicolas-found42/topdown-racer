@@ -46,6 +46,21 @@ pub struct NearestSegment {
     pub distance: f32,
 }
 
+/// The Car's position expressed in the Track's centerline frame: how far
+/// around the loop it is, which way the centerline runs there, and how far
+/// off-center it sits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CenterlineFrame {
+    /// Arc position along the closed centerline (0 = first vertex, increasing
+    /// in the polyline's forward direction, wrapping at the loop length).
+    pub arc: f32,
+    /// Unit vector of the centerline's forward direction at `arc`.
+    pub direction: Vec2,
+    /// Signed lateral offset from the centerline; positive is to the left of
+    /// `direction`.
+    pub lateral: f32,
+}
+
 impl Surface {
     pub const KNOWN: [Surface; 3] = [Surface::Road, Surface::Grass, Surface::Gravel];
 
@@ -221,23 +236,60 @@ impl Track {
         })
     }
 
+    /// Total arc length of the closed centerline polyline.
+    pub fn total_length(&self) -> f32 {
+        (0..self.points.len() - 1)
+            .map(|i| self.points[i].distance(self.points[i + 1]))
+            .sum()
+    }
+
+    /// Point on the centerline at arc position `arc` (0 = first vertex,
+    /// increasing along the polyline's forward direction; wraps at the loop).
+    pub fn point_at_arc(&self, arc: f32) -> Vec2 {
+        let segments = self.points.len() - 1;
+        let mut remaining = arc.rem_euclid(self.total_length());
+        for seg in 0..segments {
+            let a = self.points[seg];
+            let b = self.points[seg + 1];
+            let len = a.distance(b);
+            if remaining <= len {
+                return if len > 1e-6 {
+                    a + (b - a) / len * remaining
+                } else {
+                    a
+                };
+            }
+            remaining -= len;
+        }
+        self.points[0]
+    }
+
+    /// Expresses `pose` in the centerline frame: arc position, forward
+    /// direction, and signed lateral offset (positive = left of forward).
+    pub fn centerline_frame(&self, pose: Vec2) -> CenterlineFrame {
+        let nearest = self.nearest_segment(pose);
+        let a = self.points[nearest.segment_index];
+        let b = self.points[nearest.segment_index + 1];
+        let ab = b - a;
+        let len = ab.length();
+        let direction = if len > 1e-6 { ab / len } else { Vec2::X };
+        let along = (nearest.closest_point - a).dot(direction).clamp(0.0, len);
+        let mut arc = along;
+        for i in 0..nearest.segment_index {
+            arc += self.points[i].distance(self.points[i + 1]);
+        }
+        let delta = pose - nearest.closest_point;
+        CenterlineFrame {
+            arc,
+            direction,
+            lateral: direction.x * delta.y - direction.y * delta.x,
+        }
+    }
+
     /// Returns a world point `distance` units back along the polyline from
     /// the start line (the first vertex), following the closed loop backwards.
     pub fn spawn_pose(&self, distance: f32) -> Vec2 {
-        let segments = self.points.len() - 1;
-        let mut seg = segments - 1; // segment ending at the start line
-        let mut remaining = distance;
-        loop {
-            let a = self.points[seg];
-            let b = self.points[(seg + 1) % self.points.len()];
-            let len = a.distance(b);
-            if remaining <= len {
-                let dir = (b - a) / len;
-                return b - dir * remaining;
-            }
-            remaining -= len;
-            seg = (seg + segments - 1) % segments;
-        }
+        self.point_at_arc(self.total_length() - distance)
     }
 
     /// Half of the full road width: distance from the centerline polyline to
@@ -535,5 +587,40 @@ mod tests {
         assert!((contact_other.penetration - 4.0).abs() < 1e-4);
         assert!((contact_other.normal.x).abs() < 1e-4);
         assert!((contact_other.normal.y - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn arc_queries_round_trip_and_match_spawn_pose() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let total = track.total_length();
+        assert!(
+            (total - 498.3).abs() < 0.5,
+            "sample circuit length, got {total}"
+        );
+
+        // Arc 0 is the start line; advancing the full loop wraps around.
+        assert!((track.point_at_arc(0.0) - Vec2::new(0.0, 0.0)).length() < 1e-4);
+        assert!((track.point_at_arc(total) - Vec2::new(0.0, 0.0)).length() < 1e-3);
+        assert!((track.point_at_arc(120.0) - Vec2::new(120.0, 0.0)).length() < 1e-3);
+
+        // spawn_pose(distance) is the point `distance` back from the start.
+        for distance in [0.0, 5.0, 10.0, 130.0] {
+            let spawned = track.spawn_pose(distance);
+            let expected = track.point_at_arc(total - distance);
+            assert!(
+                (spawned - expected).length() < 1e-3,
+                "spawn {distance}: {spawned:?} vs {expected:?}"
+            );
+        }
+
+        // The centerline frame of an on-line pose reports arc, direction, zero lateral.
+        let frame = track.centerline_frame(Vec2::new(50.0, 0.0));
+        assert!((frame.arc - 50.0).abs() < 1e-3, "arc {}", frame.arc);
+        assert!((frame.direction - Vec2::X).length() < 1e-4);
+        assert!(frame.lateral.abs() < 1e-4);
+
+        // Off-center poses report signed lateral offset: left is positive.
+        assert!(track.centerline_frame(Vec2::new(50.0, 3.0)).lateral > 2.9);
+        assert!(track.centerline_frame(Vec2::new(50.0, -3.0)).lateral < -2.9);
     }
 }

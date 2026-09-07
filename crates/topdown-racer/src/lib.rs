@@ -38,7 +38,8 @@ pub use results::{format_results, should_show_results, spawn_results_ui, ResultR
 use bevy::prelude::*;
 use glam::Vec2;
 use topdown_racer_core::{
-    simulation::{AiDriver, CarInput, CarSnapshot, Sim, FIXED_HZ},
+    ai::AiDriver,
+    simulation::{CarInput, CarSnapshot, Sim, FIXED_HZ},
     track::{Surface, Track, SAMPLE_CIRCUIT},
 };
 
