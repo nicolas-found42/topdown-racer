@@ -935,8 +935,9 @@ pub fn persist_best_lap_on_finish(shell: Res<ShellSimulation>, mut saved: ResMut
         return;
     };
     if let Some(best) = player_snap.best_lap_time {
-        if let Ok(stored) = maybe_save_best_lap(&default_best_lap_path(), best) {
-            saved.0 = stored;
+        match maybe_save_best_lap(&default_best_lap_path(), best) {
+            Ok(stored) => saved.0 = stored,
+            Err(err) => warn!("failed to persist best lap: {err}"),
         }
     }
 }
@@ -1066,6 +1067,9 @@ fn ordinal(position: usize) -> String {
     }
 }
 
+/// Default audible playback volume for the engine loop.
+pub const DEFAULT_ENGINE_VOLUME: f32 = 0.3;
+
 /// Marker for the looping engine audio player entity.
 #[derive(Component)]
 pub struct EngineAudio;
@@ -1176,7 +1180,7 @@ pub fn setup_audio(mut commands: Commands, mut audio_sources: ResMut<Assets<Audi
             source: engine_source,
             settings: PlaybackSettings::LOOP
                 .with_speed(0.8)
-                .with_volume(bevy::audio::Volume::new(0.3)),
+                .with_volume(bevy::audio::Volume::ZERO),
         },
         EngineAudio,
     ));
@@ -1229,7 +1233,7 @@ pub fn mute_audio(
 /// Unmutes engine audio when starting/resuming an active race.
 pub fn unmute_audio(engine_q: Query<&AudioSink, With<EngineAudio>>) {
     for sink in engine_q.iter() {
-        sink.set_volume(0.3);
+        sink.set_volume(DEFAULT_ENGINE_VOLUME);
     }
 }
 
