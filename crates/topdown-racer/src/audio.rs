@@ -1,6 +1,8 @@
 //! Procedural audio: engine/skid loop generation, playback systems, and
 //! mute/unmute state transitions.
 
+use topdown_racer_core::simulation::TOP_SPEED;
+
 use bevy::prelude::*;
 
 use topdown_racer_core::simulation::CarSnapshot;
@@ -20,17 +22,18 @@ pub struct SkidAudio;
 
 /// Pure function mapping forward speed to engine audio playback speed (pitch).
 /// Idle speed (forward_speed <= 0.0) plays at 0.8x.
-/// As forward speed increases to top speed (~28.0 u/s), pitch scales smoothly up to ~2.4x.
+/// As forward speed increases to core's TOP_SPEED, pitch scales smoothly up to ~2.4x.
 pub fn engine_pitch_from_speed(forward_speed: f32) -> f32 {
     let speed = forward_speed.abs();
-    0.8 + (speed / 28.0) * 1.6
+    0.8 + (speed / TOP_SPEED) * 1.6
 }
 
-/// Pure function computing skid sound volume from drift state and speed.
-/// Returns 0.0 when not drifting or stopped.
-/// When drifting at speed, volume is non-zero (0.6).
-pub fn skid_volume_from_drift(drifting: bool, forward_speed: f32) -> f32 {
-    if drifting && forward_speed.abs() > 2.0 {
+/// Pure function computing skid sound volume from drift state.
+/// Returns 0.0 when not drifting; 0.6 while drifting.
+/// Speed eligibility is the simulation's own Drift contract (DRIFT_SPEED_MIN),
+/// so no shell-side speed gate is re-encoded here.
+pub fn skid_volume_from_drift(drifting: bool) -> f32 {
+    if drifting {
         0.6
     } else {
         0.0
@@ -47,7 +50,7 @@ pub(crate) struct AudioCue {
 pub(crate) fn audio_cue_from_snapshot(snap: &CarSnapshot) -> AudioCue {
     AudioCue {
         pitch: engine_pitch_from_speed(snap.forward_speed),
-        skid_volume: skid_volume_from_drift(snap.drifting, snap.forward_speed),
+        skid_volume: skid_volume_from_drift(snap.drifting),
     }
 }
 
@@ -187,5 +190,80 @@ pub fn mute_audio(
 pub fn unmute_audio(engine_q: Query<&AudioSink, With<EngineAudio>>) {
     for sink in engine_q.iter() {
         sink.set_volume(DEFAULT_ENGINE_VOLUME);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ShellSimulation;
+    use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
+
+    #[test]
+    fn engine_pitch_strictly_increases_with_forward_speed() {
+        let p0 = engine_pitch_from_speed(0.0);
+        let p10 = engine_pitch_from_speed(10.0);
+        let p20 = engine_pitch_from_speed(20.0);
+        let p30 = engine_pitch_from_speed(30.0);
+
+        assert!(
+            p0 > 0.7 && p0 < 0.9,
+            "idle pitch should be around 0.8: got {p0}"
+        );
+        assert!(
+            p10 > p0,
+            "pitch must increase with speed: p10={p10} > p0={p0}"
+        );
+        assert!(
+            p20 > p10,
+            "pitch must increase with speed: p20={p20} > p10={p10}"
+        );
+        assert!(
+            p30 > p20,
+            "pitch must increase with speed: p30={p30} > p20={p20}"
+        );
+    }
+
+    #[test]
+    fn skid_volume_is_active_during_drift_and_silent_when_grip_recovers() {
+        // Grip recovers (drifting becomes false): silent
+        assert_eq!(skid_volume_from_drift(false), 0.0);
+
+        // Drifting: audible skid cue
+        let vol_drift = skid_volume_from_drift(true);
+        assert!(
+            vol_drift > 0.5,
+            "skid volume must be audible while drifting: got {vol_drift}"
+        );
+    }
+
+    #[test]
+    fn audio_systems_run_without_error_when_no_audio_device_is_present() {
+        let mut app = App::new();
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        app.insert_resource(ShellSimulation::new(track))
+            .add_systems(Update, (update_audio, mute_audio, unmute_audio));
+
+        // Spawn audio entities without AudioSink (simulating headless runner without audio stream)
+        app.world_mut().spawn(EngineAudio);
+        app.world_mut().spawn(SkidAudio);
+
+        // Must execute cleanly without error or panic
+        app.update();
+    }
+
+    #[test]
+    fn pcm_wav_generator_produces_valid_wave_header() {
+        let engine_wav = generate_engine_loop_wav();
+        assert!(engine_wav.len() > 44);
+        assert_eq!(&engine_wav[0..4], b"RIFF");
+        assert_eq!(&engine_wav[8..12], b"WAVE");
+        assert_eq!(&engine_wav[12..16], b"fmt ");
+        assert_eq!(&engine_wav[36..40], b"data");
+
+        let skid_wav = generate_skid_loop_wav();
+        assert!(skid_wav.len() > 44);
+        assert_eq!(&skid_wav[0..4], b"RIFF");
+        assert_eq!(&skid_wav[8..12], b"WAVE");
     }
 }

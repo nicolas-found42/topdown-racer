@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 
-use crate::hud::format_time;
+use crate::fmt::format_time;
 use crate::ShellSimulation;
 
 /// Best lap loaded from local storage, shown on the menu as the target to beat.
@@ -105,5 +105,81 @@ pub fn persist_best_lap_on_finish(shell: Res<ShellSimulation>, mut saved: ResMut
             Ok(stored) => saved.0 = stored,
             Err(err) => warn!("failed to persist best lap: {err}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_best_lap_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "topdown-racer-test-{}-{}-best_lap.txt",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn best_lap_survives_app_restarts() {
+        let path = temp_best_lap_path("restart");
+        assert_eq!(load_best_lap(&path), None);
+
+        // First session saves a best lap; a fresh load (new process) reads it back.
+        let stored = maybe_save_best_lap(&path, 18.455).unwrap();
+        assert_eq!(stored, Some(18.455));
+        assert_eq!(load_best_lap(&path), Some(18.455));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn menu_shows_the_saved_best_lap_as_the_target() {
+        assert_eq!(
+            format_best_target(Some(18.455)),
+            format!("TARGET TO BEAT — BEST {}", format_time(18.455))
+        );
+        assert_eq!(format_best_target(None), "TARGET TO BEAT — no best lap yet");
+    }
+
+    #[test]
+    fn only_a_genuine_improvement_overwrites_the_saved_best() {
+        let path = temp_best_lap_path("improvement");
+
+        // First ever lap always saves.
+        assert_eq!(maybe_save_best_lap(&path, 20.0).unwrap(), Some(20.0));
+
+        // A slower lap never overwrites the saved best.
+        assert_eq!(maybe_save_best_lap(&path, 25.0).unwrap(), Some(20.0));
+        assert_eq!(load_best_lap(&path), Some(20.0));
+
+        // A faster lap overwrites the saved best.
+        assert_eq!(maybe_save_best_lap(&path, 18.25).unwrap(), Some(18.25));
+        assert_eq!(load_best_lap(&path), Some(18.25));
+
+        // Malformed saves read as missing and get overwritten.
+        std::fs::write(&path, "not-a-time\n").unwrap();
+        assert_eq!(load_best_lap(&path), None);
+        assert_eq!(maybe_save_best_lap(&path, 19.0).unwrap(), Some(19.0));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn default_best_lap_path_lives_in_the_app_config_dir() {
+        let path = default_best_lap_path();
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(BEST_LAP_FILE_NAME)
+        );
+        assert!(
+            path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                == Some("topdown-racer")
+        );
     }
 }

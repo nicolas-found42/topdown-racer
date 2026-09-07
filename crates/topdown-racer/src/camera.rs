@@ -3,7 +3,7 @@
 
 use bevy::{prelude::*, render::camera::Viewport, window::PrimaryWindow};
 use glam::Vec2;
-use topdown_racer_core::simulation::CarSnapshot;
+use topdown_racer_core::simulation::{wrap_angle, CarSnapshot};
 
 use crate::{CarVisual, ShellSimulation, CAMERA_ZOOM, TARGET_ASPECT_RATIO};
 
@@ -59,17 +59,6 @@ pub fn compute_letterbox_viewport(
             height: viewport_height.min(window_height),
         }
     }
-}
-
-/// Wraps an angle delta to the range $[-\pi, \pi]$ taking the shortest rotational path.
-pub fn wrap_angle(mut delta: f32) -> f32 {
-    while delta > std::f32::consts::PI {
-        delta -= 2.0 * std::f32::consts::PI;
-    }
-    while delta < -std::f32::consts::PI {
-        delta += 2.0 * std::f32::consts::PI;
-    }
-    delta
 }
 
 /// Smoothly interpolates an angle in radians between `prev` and `curr` taking
@@ -154,5 +143,75 @@ pub(crate) fn interpolate_car_and_camera(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn letterbox_viewport_exact_aspect_ratio_fills_window() {
+        let vp = compute_letterbox_viewport(1920, 1080, 16.0 / 9.0);
+        assert_eq!(vp.x, 0);
+        assert_eq!(vp.y, 0);
+        assert_eq!(vp.width, 1920);
+        assert_eq!(vp.height, 1080);
+    }
+
+    #[test]
+    fn letterbox_viewport_wider_window_adds_pillarbox() {
+        let vp = compute_letterbox_viewport(2560, 1080, 16.0 / 9.0);
+        assert_eq!(vp.width, 1920);
+        assert_eq!(vp.height, 1080);
+        assert_eq!(vp.x, 320); // (2560 - 1920) / 2
+        assert_eq!(vp.y, 0);
+    }
+
+    #[test]
+    fn letterbox_viewport_taller_window_adds_letterbox() {
+        let vp = compute_letterbox_viewport(1080, 1920, 16.0 / 9.0);
+        assert_eq!(vp.width, 1080);
+        assert_eq!(vp.height, 608);
+        assert_eq!(vp.x, 0);
+        assert_eq!(vp.y, (1920 - 608) / 2);
+    }
+
+    #[test]
+    fn interpolate_pose_endpoints_and_midpoint() {
+        let p0 = Vec2::new(0.0, 10.0);
+        let p1 = Vec2::new(20.0, 30.0);
+        assert_eq!(interpolate_pose(p0, p1, 0.0), p0);
+        assert_eq!(interpolate_pose(p0, p1, 1.0), p1);
+        assert_eq!(interpolate_pose(p0, p1, 0.5), Vec2::new(10.0, 20.0));
+    }
+
+    #[test]
+    fn interpolate_heading_crosses_pi_boundary_smoothly() {
+        let prev = 3.10; // close to +pi
+        let curr = -3.10; // close to -pi
+        let mid = interpolate_heading(prev, curr, 0.5);
+        assert!(
+            mid.abs() > 3.0,
+            "midpoint across boundary must stay near +/- pi: got {}",
+            mid
+        );
+    }
+
+    #[test]
+    fn follow_camera_transform_tracks_car_pose_with_identity_rotation() {
+        let p0 = Vec2::new(10.0, 20.0);
+        let p1 = Vec2::new(30.0, 40.0);
+        let alpha = 0.5;
+        let interp = interpolate_pose(p0, p1, alpha);
+
+        let mut cam_tf = Transform::from_xyz(0.0, 0.0, 999.0);
+        cam_tf.translation.x = interp.x;
+        cam_tf.translation.y = interp.y;
+        cam_tf.rotation = Quat::IDENTITY;
+
+        assert_eq!(cam_tf.translation.x, 20.0);
+        assert_eq!(cam_tf.translation.y, 30.0);
+        assert_eq!(cam_tf.rotation, Quat::IDENTITY);
     }
 }

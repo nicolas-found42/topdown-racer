@@ -90,6 +90,9 @@ pub struct Sim {
     track: Track,
     cars: Vec<CarState>,
     phase: RacePhase,
+    /// Fixed ticks elapsed since the race phase began (green). The Race clock
+    /// lives in the simulation so every consumer (HUD, overlays) reads one clock.
+    racing_ticks: u32,
 }
 
 struct CarState {
@@ -152,7 +155,12 @@ impl Sim {
                 }
             })
             .collect();
-        Sim { track, cars, phase }
+        Sim {
+            track,
+            cars,
+            phase,
+            racing_ticks: 0,
+        }
     }
 
     /// Enables AI driver controllers for trailing cars (indices 1..car_count).
@@ -177,6 +185,16 @@ impl Sim {
     /// Current phase of the Race.
     pub fn phase(&self) -> RacePhase {
         self.phase
+    }
+
+    /// Fixed ticks elapsed since the race phase began (green); 0 during countdown.
+    pub fn racing_ticks(&self) -> u32 {
+        self.racing_ticks
+    }
+
+    /// Whether car `car_index` currently has an AI driver attached.
+    pub fn ai_enabled(&self, car_index: usize) -> bool {
+        self.cars.get(car_index).is_some_and(|car| car.ai.is_some())
     }
 
     /// Puts the simulation into a countdown with the specified number of ticks.
@@ -207,7 +225,11 @@ impl Sim {
                     false
                 }
             }
-            RacePhase::Racing | RacePhase::Finished => false,
+            RacePhase::Racing => {
+                self.racing_ticks += 1;
+                false
+            }
+            RacePhase::Finished => false,
         };
         let total_cps = self.track.points.len() - 1;
         let cp_radius = self.track.wall_distance() * 1.5;
@@ -254,26 +276,59 @@ impl Sim {
         // Build final snapshots
         self.cars
             .iter()
-            .enumerate()
-            .map(|(i, car)| {
-                let (surface, wall_contact, drifting) = step_results[i];
-                CarSnapshot {
-                    pose: car.pose,
-                    heading: car.heading,
-                    velocity: car.velocity,
-                    forward_speed: car.velocity.dot(forward(car.heading)),
-                    surface,
-                    wall_contact,
-                    drifting,
-                    phase: self.phase,
-                    completed_laps: car.completed_laps,
-                    lap_times: car.lap_times,
-                    current_lap_time: car.current_lap_ticks as f32 * FIXED_DT,
-                    best_lap_time: car.best_lap_time,
-                    position: positions[i],
-                }
+            .zip(positions.iter())
+            .zip(step_results.iter())
+            .map(|((car, &position), &(surface, wall_contact, drifting))| {
+                Self::make_snapshot(car, surface, wall_contact, drifting, position, self.phase)
             })
             .collect()
+    }
+
+    /// Projects each Car's current state into a snapshot without stepping.
+    /// Surface and wall contact are sampled at the current pose; `drifting`
+    /// is false because drift state is only meaningful after a step.
+    pub fn snapshots(&self) -> Vec<CarSnapshot> {
+        let positions = compute_positions(&self.cars, &self.track);
+        self.cars
+            .iter()
+            .zip(positions.iter())
+            .map(|(car, &position)| {
+                Self::make_snapshot(
+                    car,
+                    self.track.sample_surface(car.pose),
+                    self.track.wall_contact(car.pose).is_some(),
+                    false,
+                    position,
+                    self.phase,
+                )
+            })
+            .collect()
+    }
+
+    /// Shared CarState → CarSnapshot projection for tick and no-tick paths.
+    fn make_snapshot(
+        car: &CarState,
+        surface: Surface,
+        wall_contact: bool,
+        drifting: bool,
+        position: usize,
+        phase: RacePhase,
+    ) -> CarSnapshot {
+        CarSnapshot {
+            pose: car.pose,
+            heading: car.heading,
+            velocity: car.velocity,
+            forward_speed: car.velocity.dot(forward(car.heading)),
+            surface,
+            wall_contact,
+            drifting,
+            phase,
+            completed_laps: car.completed_laps,
+            lap_times: car.lap_times,
+            current_lap_time: car.current_lap_ticks as f32 * FIXED_DT,
+            best_lap_time: car.best_lap_time,
+            position,
+        }
     }
 }
 
@@ -518,6 +573,10 @@ const ENGINE_ACCEL: f32 = 24.0;
 const DRAG_COEFF: f32 = 0.0075;
 /// Linear rolling resistance, per unit/s.
 const ROLLING_RESIST: f32 = 0.6;
+/// Terminal speed reached at full throttle when engine accel balances quadratic
+/// drag and rolling resistance (derived from ENGINE_ACCEL, DRAG_COEFF, ROLLING_RESIST;
+/// pinned by the terminal_speed_matches_top_speed_const test).
+pub const TOP_SPEED: f32 = 29.3;
 /// Braking deceleration at full brake, in world units per second squared.
 const BRAKE_ACCEL: f32 = 36.0;
 /// Reverse acceleration at full demand, in world units per second squared.
@@ -716,6 +775,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wrap_angle_normalizes_to_pi_range() {
+        assert_eq!(wrap_angle(0.0), 0.0);
+        assert_eq!(wrap_angle(2.0 * std::f32::consts::PI), 0.0);
+        let pi = std::f32::consts::PI;
+        assert!((wrap_angle(pi + 0.1) - (-pi + 0.1)).abs() < 1e-5);
+        assert!((wrap_angle(-pi - 0.1) - (pi - 0.1)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn terminal_speed_matches_top_speed_const() {
+        let track = straight_track();
+        let full_throttle = vec![
+            CarInput {
+                throttle: 1.0,
+                ..CarInput::default()
+            };
+            640
+        ];
+        let snaps = run(track, &full_throttle);
+        let plateau = snaps.last().unwrap().forward_speed;
+        assert!(
+            (plateau - TOP_SPEED).abs() < 0.5,
+            "terminal speed {plateau} must stay within 0.5 of TOP_SPEED {}",
+            TOP_SPEED
+        );
+    }
+
+    #[test]
+    fn racing_clock_counts_from_green_and_snapshots_project_without_stepping() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new_race(track, 2);
+        assert_eq!(sim.racing_ticks(), 0);
+
+        // Projection without stepping: phase, pose, and countdown intact.
+        let pre = sim.snapshots();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(
+            pre[0].phase,
+            RacePhase::Countdown {
+                ticks_remaining: DEFAULT_COUNTDOWN_TICKS
+            }
+        );
+        assert_eq!(sim.racing_ticks(), 0);
+
+        // The clock counts only green ticks, never countdown ticks.
+        for _ in 0..DEFAULT_COUNTDOWN_TICKS + 5 {
+            sim.tick(&[CarInput::default(), CarInput::default()]);
+        }
+        assert_eq!(sim.racing_ticks(), 5);
+        assert_eq!(sim.snapshots()[0].phase, RacePhase::Racing);
+    }
+
     fn run(track: Track, inputs: &[CarInput]) -> Vec<CarSnapshot> {
         let mut sim = Sim::new(track, 1);
         let mut snaps = Vec::with_capacity(inputs.len());
@@ -734,13 +846,7 @@ mod tests {
         let target = waypoints[*current_wp];
         let to_target = target - *last_pose;
         let target_angle = to_target.y.atan2(to_target.x);
-        let mut angle_diff = target_angle - *last_heading;
-        while angle_diff > std::f32::consts::PI {
-            angle_diff -= 2.0 * std::f32::consts::PI;
-        }
-        while angle_diff < -std::f32::consts::PI {
-            angle_diff += 2.0 * std::f32::consts::PI;
-        }
+        let angle_diff = wrap_angle(target_angle - *last_heading);
 
         let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
         let throttle = if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 };

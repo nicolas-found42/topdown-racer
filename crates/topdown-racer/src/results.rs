@@ -1,12 +1,11 @@
-//! Results projection: ordered results table, finish detection, and the
-//! results screen UI.
+//! Results projection: ordered results table and the results screen UI.
 
 use bevy::prelude::*;
 use topdown_racer_core::simulation::{CarSnapshot, RacePhase};
 
-use crate::hud::format_time;
+use crate::fmt::{format_opt_lap_time, ordinal};
 use crate::overlay::spawn_overlay_root;
-use crate::{AppState, ShellSimulation};
+use crate::ShellSimulation;
 
 /// Returns true only when the race phase warrants showing the results screen.
 pub fn should_show_results(phase: RacePhase) -> bool {
@@ -46,37 +45,9 @@ pub fn format_results(snaps: &[CarSnapshot]) -> Vec<ResultRow> {
         .collect()
 }
 
-/// Formats an optional lap time, showing a placeholder when no lap is recorded.
-pub fn format_opt_lap_time(seconds: Option<f32>) -> String {
-    match seconds {
-        Some(secs) => format_time(secs),
-        None => "--:--.--".to_owned(),
-    }
-}
-
-/// Formats a 1-indexed position with its ordinal suffix.
-pub(crate) fn ordinal(position: usize) -> String {
-    match position {
-        1 => "1st".to_owned(),
-        2 => "2nd".to_owned(),
-        3 => "3rd".to_owned(),
-        n => format!("{n}th"),
-    }
-}
-
 /// Marker for the results screen root entity.
 #[derive(Component)]
 pub struct ResultsUi;
-
-/// Transitions to the results screen exactly when the race finishes.
-pub fn detect_race_finish(
-    shell: Res<ShellSimulation>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    if should_show_results(shell.sim.phase()) {
-        next_state.set(AppState::Results);
-    }
-}
 
 /// Spawns the results screen from simulation snapshots.
 pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
@@ -120,15 +91,92 @@ pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
         });
 }
 
-/// Instant-restarts a fresh race (R / Enter) or returns to the menu (ESC).
-pub fn results_action_system(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    if keyboard.just_pressed(KeyCode::KeyR) || keyboard.just_pressed(KeyCode::Enter) {
-        // OnEnter(Race) rebuilds the fresh countdown race; no menu pass-through.
-        next_state.set(AppState::Race);
-    } else if keyboard.just_pressed(KeyCode::Escape) {
-        next_state.set(AppState::Menu);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hud::sample_snapshot;
+    use topdown_racer_core::simulation::{CarInput, Sim};
+    use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
+
+    fn results_snapshot(
+        position: usize,
+        lap_times: [Option<f32>; 3],
+        best_lap_time: Option<f32>,
+    ) -> CarSnapshot {
+        let mut snap = sample_snapshot();
+        snap.position = position;
+        snap.completed_laps = 3;
+        snap.lap_times = lap_times;
+        snap.best_lap_time = best_lap_time;
+        snap.phase = topdown_racer_core::simulation::RacePhase::Finished;
+        snap
+    }
+
+    #[test]
+    fn results_show_correct_finishing_order_and_per_car_lap_times() {
+        // Snapshots arrive in car order; positions come from the simulation.
+        let snaps = vec![
+            results_snapshot(2, [Some(20.5), Some(19.5), Some(21.0)], Some(19.5)),
+            results_snapshot(1, [Some(18.0), Some(18.5), Some(17.5)], Some(17.5)),
+            results_snapshot(4, [Some(25.0), Some(24.0), Some(26.0)], Some(24.0)),
+            results_snapshot(3, [Some(22.0), Some(21.0), Some(23.0)], Some(21.0)),
+        ];
+
+        let rows = format_results(&snaps);
+        assert_eq!(rows.len(), 4);
+        let car_order: Vec<usize> = rows.iter().map(|r| r.car_number).collect();
+        assert_eq!(car_order, vec![2, 1, 4, 3]);
+        assert_eq!(rows[0].position, 1);
+        assert_eq!(rows[0].lap_times, vec!["00:18.00", "00:18.50", "00:17.50"]);
+        assert_eq!(rows[0].best_lap, "00:17.50");
+        assert_eq!(rows[3].position, 4);
+        assert_eq!(rows[3].best_lap, "00:24.00");
+    }
+
+    #[test]
+    fn race_cannot_finish_before_three_laps_and_results_appear_exactly_at_finish() {
+        use topdown_racer_core::simulation::RacePhase;
+        assert!(!should_show_results(RacePhase::Countdown {
+            ticks_remaining: 10
+        }));
+        assert!(!should_show_results(RacePhase::Racing));
+        assert!(should_show_results(RacePhase::Finished));
+
+        // A sim that completed a single lap is still racing, never finished.
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new(track.clone(), 1);
+        let waypoints = &track.points[..track.points.len() - 1];
+        let mut current_wp = 1;
+        let mut last_pose = sim.tick(&[CarInput::default()])[0].pose;
+        let mut last_heading = 0.0f32;
+        let mut saw_lap_one_racing = false;
+        for _ in 0..1800 {
+            let target = waypoints[current_wp];
+            let to_target = target - last_pose;
+            let target_angle = to_target.y.atan2(to_target.x);
+            let angle_diff =
+                topdown_racer_core::simulation::wrap_angle(target_angle - last_heading);
+            let snap = sim.tick(&[CarInput {
+                throttle: if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 },
+                brake: 0.0,
+                steer: (angle_diff * 2.5).clamp(-1.0, 1.0),
+                handbrake: false,
+            }])[0];
+            last_pose = snap.pose;
+            last_heading = snap.heading;
+            if snap.completed_laps == 1 {
+                assert_eq!(snap.phase, RacePhase::Racing);
+                assert!(!should_show_results(snap.phase));
+                saw_lap_one_racing = true;
+                break;
+            }
+            if (target - snap.pose).length() < 14.0 {
+                current_wp = (current_wp + 1) % waypoints.len();
+            }
+        }
+        assert!(
+            saw_lap_one_racing,
+            "must complete one lap while still racing"
+        );
     }
 }

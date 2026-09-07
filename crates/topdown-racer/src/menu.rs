@@ -1,10 +1,9 @@
-//! Menu screen: start button, keyboard shortcuts, and race-state transitions.
+//! Menu screen: start button UI and keyboard shortcuts.
 
 use bevy::prelude::*;
 
 use crate::best_lap::{format_best_target, SavedBestLap};
 use crate::overlay::spawn_overlay_root;
-use crate::{AppState, ShellSimulation};
 
 /// Marker for the menu screen root entity.
 #[derive(Component)]
@@ -13,11 +12,6 @@ pub struct MenuUi;
 /// Marker for the menu start button.
 #[derive(Component)]
 pub struct StartButton;
-
-/// Rebuilds a fresh countdown race whenever entering the Race state.
-pub fn reset_race_on_enter(mut shell: ResMut<ShellSimulation>) {
-    shell.reset_to_fresh_race();
-}
 
 /// Spawns the menu screen with a start option and the saved best-lap target.
 pub fn spawn_menu_ui(mut commands: Commands, saved: Res<SavedBestLap>) {
@@ -65,28 +59,4 @@ pub fn spawn_menu_ui(mut commands: Commands, saved: Res<SavedBestLap>) {
                 ));
             });
         });
-}
-
-/// Starts the race from the menu via the button or the Enter key.
-pub fn menu_action_system(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    button_q: Query<&Interaction, (Changed<Interaction>, With<StartButton>)>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    let button_clicked = button_q
-        .iter()
-        .any(|interaction| *interaction == Interaction::Pressed);
-    if button_clicked || keyboard.just_pressed(KeyCode::Enter) {
-        next_state.set(AppState::Race);
-    }
-}
-
-/// Returns cleanly to the menu when ESC is pressed during a race.
-pub fn esc_to_menu_system(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    if keyboard.just_pressed(KeyCode::Escape) {
-        next_state.set(AppState::Menu);
-    }
 }
