@@ -37,8 +37,8 @@ impl Default for CarInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
 /// One Car's externally observable state after a tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CarSnapshot {
     /// World position.
     pub pose: Vec2,
@@ -183,7 +183,7 @@ fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, boo
             let accel = drive - drag - brake - handbrake_drag;
             vf += accel * FIXED_DT;
 
-            if input.brake > 0.0 && vf < 0.0 {
+            if (input.brake > 0.0 || input.handbrake) && vf < 0.0 {
                 vf = 0.0;
             }
         }
@@ -215,6 +215,8 @@ fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, boo
     // acceleration shifts weight to the rear, causing understeer.
     let weight_bias = if input.brake > 0.0 {
         1.0 + input.brake * BRAKE_WEIGHT_TRANSFER
+    } else if input.throttle > 0.0 {
+        1.0 - input.throttle * ACCEL_WEIGHT_TRANSFER
     } else {
         1.0
     };
@@ -252,11 +254,6 @@ fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, boo
     car.velocity = fwd_new * vf_post + left_new * vl_damped;
     car.pose += car.velocity * FIXED_DT;
 
-    // Drift state: controlled lateral slip exceeding threshold at speed.
-    let lateral_slip = vl_damped.abs();
-    let drifting = vf_post.abs() > DRIFT_SPEED_MIN
-        && (lateral_slip > DRIFT_LATERAL_SLIP_MIN || (input.handbrake && lateral_slip > 0.4));
-
     // Wall collision response: bounce with speed loss and inward reflection.
     let wall_contact = if let Some(contact) = track.wall_contact(car.pose) {
         car.pose += contact.normal * contact.penetration;
@@ -273,6 +270,15 @@ fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, boo
     } else {
         false
     };
+
+    // Drift state: controlled lateral slip from grip model, distinct from wall-slide.
+    let vf_final = car.velocity.dot(fwd_new);
+    let vl_final = car.velocity.dot(left_new);
+    let lateral_slip = vl_final.abs();
+    let drifting = !wall_contact
+        && vf_final.abs() > DRIFT_SPEED_MIN
+        && (lateral_slip > DRIFT_LATERAL_SLIP_MIN
+            || (input.handbrake && lateral_slip > HANDBRAKE_DRIFT_SLIP_MIN));
 
     // Sample surface at post-move pose so CarSnapshot matches the final pose.
     let post_surface = track.sample_surface(car.pose);
@@ -312,6 +318,8 @@ const WALL_RESTITUTION: f32 = 0.4;
 const WALL_FRICTION: f32 = 0.75;
 /// Weight transfer factor increasing front steering bite under braking.
 const BRAKE_WEIGHT_TRANSFER: f32 = 0.45;
+/// Weight transfer factor decreasing front steering bite under acceleration (understeer).
+const ACCEL_WEIGHT_TRANSFER: f32 = 0.08;
 /// Rear axle grip reduction factor under braking.
 const BRAKE_REAR_UNLOAD: f32 = 0.25;
 /// Lateral grip restitution rate damping sideways velocity (1/s).
@@ -324,6 +332,8 @@ const HANDBRAKE_DECEL: f32 = 12.0;
 const DRIFT_SPEED_MIN: f32 = 3.0;
 /// Minimum lateral slip speed to enter the Drift state.
 const DRIFT_LATERAL_SLIP_MIN: f32 = 1.2;
+/// Minimum lateral slip speed under handbrake to enter the Drift state.
+const HANDBRAKE_DRIFT_SLIP_MIN: f32 = 0.4;
 
 #[cfg(test)]
 mod tests {
@@ -951,5 +961,28 @@ mod tests {
             observed_drift,
             "hard handbrake turn at speed must trigger drifting state on snapshot"
         );
+    }
+
+    #[test]
+    fn handbrake_at_speed_stops_without_reversing() {
+        let straight = straight_track();
+        let mut sim = Sim::new(straight, 1);
+        for _ in 0..64 {
+            sim.tick(&[hold(1.0, 0.0, 0.0)]);
+        }
+        let hb_stop = CarInput {
+            throttle: 0.0,
+            brake: 0.0,
+            steer: 0.0,
+            handbrake: true,
+        };
+        for _ in 0..128 {
+            let snap = sim.tick(&[hb_stop])[0];
+            assert!(
+                snap.forward_speed >= 0.0,
+                "handbrake must not drive the car in reverse: got {}",
+                snap.forward_speed
+            );
+        }
     }
 }
