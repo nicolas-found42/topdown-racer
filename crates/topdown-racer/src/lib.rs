@@ -1,10 +1,15 @@
 //! Shell library for Topdown Racer: camera, rendering, and simulation glue.
 
-use bevy::{prelude::*, render::camera::Viewport, window::PrimaryWindow};
+use bevy::{
+    prelude::*,
+    render::{camera::Viewport, view::window::screenshot::ScreenshotManager},
+    window::PrimaryWindow,
+};
 use glam::Vec2;
 use topdown_racer_core::{
     simulation::{
-        CarInput, CarSnapshot, RacePhase, Sim, DEFAULT_COUNTDOWN_TICKS, FIXED_DT, FIXED_HZ,
+        AiDriver, CarInput, CarSnapshot, RacePhase, Sim, DEFAULT_COUNTDOWN_TICKS, FIXED_DT,
+        FIXED_HZ,
     },
     track::{Surface, Track, SAMPLE_CIRCUIT},
 };
@@ -13,7 +18,7 @@ use topdown_racer_core::{
 pub const TARGET_ASPECT_RATIO: f32 = 16.0 / 9.0;
 
 /// Fixed camera zoom (orthographic scale). Smaller value = closer zoom.
-pub const CAMERA_ZOOM: f32 = 0.08;
+pub const CAMERA_ZOOM: f32 = 0.05;
 
 /// Rectangular viewport region for letterboxing/pillarboxing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +113,10 @@ pub struct ShellSimulation {
     pub curr_snapshots: Vec<CarSnapshot>,
     /// Fixed ticks elapsed since the race phase began (green), for overlay timing.
     pub racing_ticks: u32,
+    /// AI controller for automatic driving of the player's car.
+    pub player_ai: AiDriver,
+    /// Whether player car autopilot is enabled when no manual controls are pressed.
+    pub autopilot: bool,
 }
 
 impl ShellSimulation {
@@ -122,6 +131,8 @@ impl ShellSimulation {
             prev_snapshots: initial.clone(),
             curr_snapshots: initial,
             racing_ticks: 0,
+            player_ai: AiDriver::new(0),
+            autopilot: true,
         }
     }
 
@@ -166,11 +177,18 @@ pub struct RacerGamePlugin;
 impl Plugin for RacerGamePlugin {
     fn build(&self, app: &mut App) {
         let track = Track::parse(SAMPLE_CIRCUIT).expect("sample circuit must parse");
+        let auto_start = std::env::var("TOPDOWN_AUTO_START").as_deref() == Ok("1");
+        let capture_frames = std::env::var("TOPDOWN_CAPTURE").as_deref() == Ok("1");
+
         app.init_state::<AppState>()
             .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
             .insert_resource(ShellSimulation::new(track))
             .insert_resource(SavedBestLap(load_best_lap(&default_best_lap_path())))
             .init_resource::<PlayerInput>()
+            .insert_resource(FrameCapture {
+                active: capture_frames,
+                ..default()
+            })
             .add_systems(
                 Startup,
                 (setup_camera, setup_track, setup_car, setup_hud, setup_audio),
@@ -217,9 +235,21 @@ impl Plugin for RacerGamePlugin {
                     update_hud.run_if(in_state(AppState::Race)),
                     update_countdown_overlay.run_if(in_state(AppState::Race)),
                     update_audio.run_if(in_state(AppState::Race)),
+                    toggle_autopilot_system.run_if(in_state(AppState::Race)),
+                    frame_capture_system,
                 ),
             );
+
+        if auto_start {
+            app.add_systems(Startup, auto_start_race);
+        }
     }
+}
+
+/// Skips the menu when TOPDOWN_AUTO_START=1 by transitioning into the Race state
+/// on the first frame, so OnEnter(Race) systems (HUD show, race reset) still run.
+fn auto_start_race(mut next_state: ResMut<NextState<AppState>>) {
+    next_state.set(AppState::Race);
 }
 fn setup_camera(mut commands: Commands) {
     let mut camera = Camera2dBundle::default();
@@ -238,29 +268,75 @@ fn setup_track(
     let n = points.len() - 1;
 
     // Background grass field behind the track
-    let grass_mesh = meshes.add(Rectangle::new(1400.0, 900.0));
-    let grass_mat = materials.add(Color::srgb(0.12, 0.35, 0.12));
+    let grass_mesh = meshes.add(Rectangle::new(2400.0, 1600.0));
+    let grass_mat = materials.add(Color::srgb(0.12, 0.36, 0.14));
     commands.spawn(ColorMesh2dBundle {
         mesh: grass_mesh.into(),
         material: grass_mat,
-        transform: Transform::from_xyz(0.0, 0.0, 0.0),
+        transform: Transform::from_xyz(80.0, 60.0, 0.0),
         ..default()
     });
 
-    let road_mat = materials.add(Color::srgb(0.22, 0.22, 0.26));
-    let gravel_mat = materials.add(Color::srgb(0.48, 0.40, 0.28));
-    let wall_mat = materials.add(Color::srgb(0.75, 0.25, 0.25));
-    let start_mat = materials.add(Color::srgb(0.95, 0.95, 0.95));
+    let road_mat = materials.add(Color::srgb(0.20, 0.20, 0.24));
+    let gravel_mat = materials.add(Color::srgb(0.55, 0.44, 0.28));
+    let white_mat = materials.add(Color::srgb(0.95, 0.95, 0.95));
+    let black_mat = materials.add(Color::srgb(0.10, 0.10, 0.12));
+    let kerb_red = materials.add(Color::srgb(0.85, 0.18, 0.18));
+    let kerb_white = materials.add(Color::srgb(0.95, 0.95, 0.95));
+    let guardrail_mat = materials.add(Color::srgb(0.72, 0.75, 0.80));
 
     let road_half_w = track.road_half_width();
     let wall_dist = track.wall_distance();
 
-    // Spawn quads for each segment
+    // Pre-calculate segment directions and normals
+    let mut seg_dirs = Vec::with_capacity(n);
+    let mut seg_normals = Vec::with_capacity(n);
+    for i in 0..n {
+        let dir = (points[i + 1] - points[i]).normalize_or_zero();
+        let normal = Vec2::new(-dir.y, dir.x);
+        seg_dirs.push(dir);
+        seg_normals.push(normal);
+    }
+
+    // Pre-calculate corner miter vectors for each vertex i (0..=n)
+    // Vertex i is at the junction between incoming segment (i + n - 1) % n and outgoing segment i % n.
+    let mut miter_normals = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let prev_idx = if i == 0 { n - 1 } else { (i - 1) % n };
+        let curr_idx = i % n;
+        let n_prev = seg_normals[prev_idx];
+        let n_curr = seg_normals[curr_idx];
+        let dot = n_prev.dot(n_curr);
+        let m = if dot > -0.999 {
+            (n_prev + n_curr) / (1.0 + dot)
+        } else {
+            n_curr
+        };
+        miter_normals.push(m);
+    }
+
+    // Mitered road perimeter points (left and right)
+    let edge_line_w = 0.35;
+    let mut left_outer = Vec::with_capacity(n + 1);
+    let mut right_outer = Vec::with_capacity(n + 1);
+    let mut left_inner = Vec::with_capacity(n + 1);
+    let mut right_inner = Vec::with_capacity(n + 1);
+
+    for i in 0..=n {
+        let p = points[i];
+        let m = miter_normals[i];
+        left_outer.push(p + m * road_half_w);
+        right_outer.push(p - m * road_half_w);
+        left_inner.push(p + m * (road_half_w - edge_line_w));
+        right_inner.push(p - m * (road_half_w - edge_line_w));
+    }
+
     for i in 0..n {
         let p0 = points[i];
         let p1 = points[i + 1];
-        let dir = (p1 - p0).normalize_or_zero();
-        let normal = Vec2::new(-dir.y, dir.x);
+        let dir = seg_dirs[i];
+        let normal = seg_normals[i];
+        let seg_len = (p1 - p0).length();
 
         let mat = match track.surfaces.get(i).copied().unwrap_or(Surface::Road) {
             Surface::Road => road_mat.clone(),
@@ -268,12 +344,12 @@ fn setup_track(
             Surface::Grass => continue,
         };
 
-        // Road segment mesh
+        // 1. Continuous mitered road surface quad
         let road_mesh = create_quad_mesh(
-            p0 + normal * road_half_w,
-            p0 - normal * road_half_w,
-            p1 - normal * road_half_w,
-            p1 + normal * road_half_w,
+            left_outer[i],
+            right_outer[i],
+            right_outer[i + 1],
+            left_outer[i + 1],
         );
         commands.spawn(ColorMesh2dBundle {
             mesh: meshes.add(road_mesh).into(),
@@ -282,43 +358,166 @@ fn setup_track(
             ..default()
         });
 
-        // Boundary walls: left and right wall line segments
-        for side in &[-1.0f32, 1.0f32] {
-            let wall_w = 0.6;
-            let offset = *side * wall_dist;
-            let w_p0 = p0 + normal * offset;
-            let w_p1 = p1 + normal * offset;
-            let wall_quad = create_quad_mesh(
-                w_p0 + normal * (wall_w * 0.5),
-                w_p0 - normal * (wall_w * 0.5),
-                w_p1 - normal * (wall_w * 0.5),
-                w_p1 + normal * (wall_w * 0.5),
-            );
-            commands.spawn(ColorMesh2dBundle {
-                mesh: meshes.add(wall_quad).into(),
-                material: wall_mat.clone(),
-                transform: Transform::from_xyz(0.0, 0.0, 2.0),
-                ..default()
-            });
-        }
-    }
-
-    // Start/finish line across the track at points[0]
-    if n > 0 {
-        let dir = (points[1] - points[0]).normalize_or_zero();
-        let normal = Vec2::new(-dir.y, dir.x);
-        let sf_mesh = create_quad_mesh(
-            points[0] + normal * road_half_w + dir * 0.5,
-            points[0] - normal * road_half_w + dir * 0.5,
-            points[0] - normal * road_half_w - dir * 0.5,
-            points[0] + normal * road_half_w - dir * 0.5,
+        // 2. Continuous mitered white edge lines (flush joints, no overlapping boxes)
+        let left_edge_mesh = create_quad_mesh(
+            left_outer[i],
+            left_inner[i],
+            left_inner[i + 1],
+            left_outer[i + 1],
         );
         commands.spawn(ColorMesh2dBundle {
-            mesh: meshes.add(sf_mesh).into(),
-            material: start_mat,
-            transform: Transform::from_xyz(0.0, 0.0, 3.0),
+            mesh: meshes.add(left_edge_mesh).into(),
+            material: white_mat.clone(),
+            transform: Transform::from_xyz(0.0, 0.0, 1.2),
             ..default()
         });
+
+        let right_edge_mesh = create_quad_mesh(
+            right_inner[i],
+            right_outer[i],
+            right_outer[i + 1],
+            right_inner[i + 1],
+        );
+        commands.spawn(ColorMesh2dBundle {
+            mesh: meshes.add(right_edge_mesh).into(),
+            material: white_mat.clone(),
+            transform: Transform::from_xyz(0.0, 0.0, 1.2),
+            ..default()
+        });
+
+        // 3. Dashed centerline (stops before corner junctions to avoid intersecting lines)
+        let dash_step = 5.0;
+        let dash_len = 2.4;
+        let start_d = (road_half_w + 1.0).min(seg_len * 0.5);
+        let end_d = (seg_len - road_half_w - 1.0).max(start_d);
+        let mut d = start_d;
+        while d + dash_len <= end_d {
+            let d0 = p0 + dir * d;
+            let d1 = p0 + dir * (d + dash_len);
+            let dash_mesh = create_quad_mesh(
+                d0 + normal * 0.18,
+                d0 - normal * 0.18,
+                d1 - normal * 0.18,
+                d1 + normal * 0.18,
+            );
+            commands.spawn(ColorMesh2dBundle {
+                mesh: meshes.add(dash_mesh).into(),
+                material: white_mat.clone(),
+                transform: Transform::from_xyz(0.0, 0.0, 1.1),
+                ..default()
+            });
+            d += dash_step;
+        }
+
+        // 4. Red-and-white rumble strip kerbs along corner apexes
+        let prev_idx = if i == 0 { n - 1 } else { i - 1 };
+        let norm_prev = seg_normals[prev_idx];
+        let dir_prev = seg_dirs[prev_idx];
+        if (norm_prev - normal).length() > 0.001 {
+            let kerb_w = 0.9;
+            let kerb_len = 1.6;
+            // Place kerbs on the inner apex side (+normal side for CCW loop)
+            // Incoming stretch towards corner
+            for step in 0..4 {
+                let d_end = (step as f32) * kerb_len;
+                let d_start = (step as f32 + 1.0) * kerb_len;
+                let pt0 = p0 - dir_prev * d_start;
+                let pt1 = p0 - dir_prev * d_end;
+                let quad = create_quad_mesh(
+                    pt0 + norm_prev * (road_half_w + kerb_w),
+                    pt0 + norm_prev * road_half_w,
+                    pt1 + norm_prev * road_half_w,
+                    pt1 + norm_prev * (road_half_w + kerb_w),
+                );
+                let mat = if step % 2 == 0 {
+                    kerb_red.clone()
+                } else {
+                    kerb_white.clone()
+                };
+                commands.spawn(ColorMesh2dBundle {
+                    mesh: meshes.add(quad).into(),
+                    material: mat,
+                    transform: Transform::from_xyz(0.0, 0.0, 1.3),
+                    ..default()
+                });
+            }
+            // Outgoing stretch from corner
+            for step in 0..4 {
+                let d_start = (step as f32) * kerb_len;
+                let d_end = (step as f32 + 1.0) * kerb_len;
+                let pt0 = p0 + dir * d_start;
+                let pt1 = p0 + dir * d_end;
+                let quad = create_quad_mesh(
+                    pt0 + normal * (road_half_w + kerb_w),
+                    pt0 + normal * road_half_w,
+                    pt1 + normal * road_half_w,
+                    pt1 + normal * (road_half_w + kerb_w),
+                );
+                let mat = if step % 2 == 0 {
+                    kerb_red.clone()
+                } else {
+                    kerb_white.clone()
+                };
+                commands.spawn(ColorMesh2dBundle {
+                    mesh: meshes.add(quad).into(),
+                    material: mat,
+                    transform: Transform::from_xyz(0.0, 0.0, 1.3),
+                    ..default()
+                });
+            }
+        }
+
+        // 5. Outer boundary safety barrier (steel guardrail around outer perimeter only)
+        // Outer side is -normal (-miter_normals), preventing walls from crossing infield
+        let wall_w = 0.8;
+        let w0 = points[i] - miter_normals[i] * wall_dist;
+        let w1 = points[i + 1] - miter_normals[i + 1] * wall_dist;
+        let w_dir = (w1 - w0).normalize_or_zero();
+        let w_norm = Vec2::new(-w_dir.y, w_dir.x);
+        let wall_quad = create_quad_mesh(
+            w0 + w_norm * (wall_w * 0.5),
+            w0 - w_norm * (wall_w * 0.5),
+            w1 - w_norm * (wall_w * 0.5),
+            w1 + w_norm * (wall_w * 0.5),
+        );
+        commands.spawn(ColorMesh2dBundle {
+            mesh: meshes.add(wall_quad).into(),
+            material: guardrail_mat.clone(),
+            transform: Transform::from_xyz(0.0, 0.0, 2.0),
+            ..default()
+        });
+    }
+
+    // Checkered start/finish line across the track at points[0]
+    if n > 0 {
+        let dir = seg_dirs[0];
+        let normal = seg_normals[0];
+        let checkers_count = 10;
+        let checker_w = (road_half_w * 2.0) / checkers_count as f32;
+        for row in 0..2 {
+            let row_offset = (row as f32 - 0.5) * 0.8;
+            for col in 0..checkers_count {
+                let col_offset = -road_half_w + (col as f32 + 0.5) * checker_w;
+                let center = points[0] + dir * row_offset + normal * col_offset;
+                let sq = create_quad_mesh(
+                    center + dir * 0.4 + normal * (checker_w * 0.5),
+                    center + dir * 0.4 - normal * (checker_w * 0.5),
+                    center - dir * 0.4 - normal * (checker_w * 0.5),
+                    center - dir * 0.4 + normal * (checker_w * 0.5),
+                );
+                let mat = if (row + col) % 2 == 0 {
+                    white_mat.clone()
+                } else {
+                    black_mat.clone()
+                };
+                commands.spawn(ColorMesh2dBundle {
+                    mesh: meshes.add(sq).into(),
+                    material: mat,
+                    transform: Transform::from_xyz(0.0, 0.0, 1.4),
+                    ..default()
+                });
+            }
+        }
     }
 }
 
@@ -348,26 +547,111 @@ fn setup_car(
     mut materials: ResMut<Assets<ColorMaterial>>,
     sim: Res<ShellSimulation>,
 ) {
-    let car_mesh = meshes.add(Rectangle::new(4.0, 2.0));
     let colors = [
-        Color::srgb(0.92, 0.22, 0.22), // Player: Red
-        Color::srgb(0.22, 0.45, 0.92), // AI 1: Blue
-        Color::srgb(0.92, 0.82, 0.22), // AI 2: Yellow
-        Color::srgb(0.72, 0.22, 0.92), // AI 3: Purple
+        Color::srgb(0.88, 0.12, 0.12), // Player: Formula Red
+        Color::srgb(0.12, 0.42, 0.88), // AI 1: Cobalt Blue
+        Color::srgb(0.92, 0.78, 0.12), // AI 2: Solar Yellow
+        Color::srgb(0.12, 0.78, 0.35), // AI 3: Emerald Green
     ];
 
+    let tire_mesh = meshes.add(Rectangle::new(1.0, 0.48));
+    let tire_mat = materials.add(Color::srgb(0.06, 0.06, 0.06));
+
+    let chassis_mesh = meshes.add(Rectangle::new(4.2, 2.0));
+    let nose_mesh = meshes.add(Rectangle::new(1.2, 1.6));
+    let cockpit_mesh = meshes.add(Rectangle::new(1.8, 1.4));
+    let cockpit_mat = materials.add(Color::srgb(0.08, 0.12, 0.18));
+
+    let stripe_mesh = meshes.add(Rectangle::new(4.2, 0.35));
+    let white_mat = materials.add(Color::srgb(0.95, 0.95, 0.95));
+
+    let wing_mesh = meshes.add(Rectangle::new(0.4, 2.3));
+    let carbon_mat = materials.add(Color::srgb(0.12, 0.12, 0.14));
+
+    let headlight_mesh = meshes.add(Rectangle::new(0.3, 0.4));
+    let headlight_mat = materials.add(Color::srgb(1.0, 0.96, 0.65));
+
+    let taillight_mesh = meshes.add(Rectangle::new(0.2, 0.4));
+    let taillight_mat = materials.add(Color::srgb(1.0, 0.15, 0.15));
+
     for (i, snap) in sim.curr_snapshots.iter().enumerate() {
-        let mat = materials.add(colors[i % colors.len()]);
-        commands.spawn((
-            ColorMesh2dBundle {
-                mesh: car_mesh.clone().into(),
-                material: mat,
-                transform: Transform::from_xyz(snap.pose.x, snap.pose.y, 10.0 + i as f32 * 0.1)
-                    .with_rotation(Quat::from_rotation_z(snap.heading)),
-                ..default()
-            },
-            CarVisual { car_index: i },
-        ));
+        let body_mat = materials.add(colors[i % colors.len()]);
+
+        commands
+            .spawn((
+                SpatialBundle {
+                    transform: Transform::from_xyz(snap.pose.x, snap.pose.y, 10.0 + i as f32 * 0.1)
+                        .with_rotation(Quat::from_rotation_z(snap.heading)),
+                    ..default()
+                },
+                CarVisual { car_index: i },
+            ))
+            .with_children(|car| {
+                // 4 Real Rubber Tires
+                for &(x, y) in &[(1.3, 1.05), (1.3, -1.05), (-1.3, 1.05), (-1.3, -1.05)] {
+                    car.spawn(ColorMesh2dBundle {
+                        mesh: tire_mesh.clone().into(),
+                        material: tire_mat.clone(),
+                        transform: Transform::from_xyz(x, y, -0.01),
+                        ..default()
+                    });
+                }
+                // Main Aerodynamic Chassis Body
+                car.spawn(ColorMesh2dBundle {
+                    mesh: chassis_mesh.clone().into(),
+                    material: body_mat.clone(),
+                    transform: Transform::from_xyz(0.0, 0.0, 0.02),
+                    ..default()
+                });
+                // Contoured Front Nose
+                car.spawn(ColorMesh2dBundle {
+                    mesh: nose_mesh.clone().into(),
+                    material: body_mat.clone(),
+                    transform: Transform::from_xyz(1.5, 0.0, 0.03),
+                    ..default()
+                });
+                // Cockpit Glass
+                car.spawn(ColorMesh2dBundle {
+                    mesh: cockpit_mesh.clone().into(),
+                    material: cockpit_mat.clone(),
+                    transform: Transform::from_xyz(0.1, 0.0, 0.04),
+                    ..default()
+                });
+                // White Racing Stripe on Player Car
+                if i == 0 {
+                    car.spawn(ColorMesh2dBundle {
+                        mesh: stripe_mesh.clone().into(),
+                        material: white_mat.clone(),
+                        transform: Transform::from_xyz(0.0, 0.0, 0.05),
+                        ..default()
+                    });
+                }
+                // Rear Spoiler / Wing
+                car.spawn(ColorMesh2dBundle {
+                    mesh: wing_mesh.clone().into(),
+                    material: carbon_mat.clone(),
+                    transform: Transform::from_xyz(-2.0, 0.0, 0.06),
+                    ..default()
+                });
+                // Twin Headlights
+                for &y in &[0.65, -0.65] {
+                    car.spawn(ColorMesh2dBundle {
+                        mesh: headlight_mesh.clone().into(),
+                        material: headlight_mat.clone(),
+                        transform: Transform::from_xyz(2.0, y, 0.05),
+                        ..default()
+                    });
+                }
+                // Twin Taillights
+                for &y in &[0.65, -0.65] {
+                    car.spawn(ColorMesh2dBundle {
+                        mesh: taillight_mesh.clone().into(),
+                        material: taillight_mat.clone(),
+                        transform: Transform::from_xyz(-2.05, y, 0.05),
+                        ..default()
+                    });
+                }
+            });
     }
 }
 /// Player input mapped from keyboard devices.
@@ -421,15 +705,174 @@ pub fn read_keyboard_input(
 }
 
 /// Fixed step system: advances the simulation at 64 Hz using mapped player inputs.
+/// When autopilot is enabled and no manual controls are pressed, the player's car
+/// is driven by the internal AI controller.
 fn step_simulation(mut shell: ResMut<ShellSimulation>, player_input: Res<PlayerInput>) {
     shell.prev_snapshots = shell.curr_snapshots.clone();
 
-    let snaps = shell.sim.tick(&[player_input.0]);
+    let manual_input = player_input.0;
+    let manual_active = manual_input != CarInput::default();
+
+    let player_input_effective = if shell.autopilot && !manual_active {
+        let snap = shell.curr_snapshots[0];
+        let fwd = Vec2::new(snap.heading.cos(), snap.heading.sin());
+        let fwd_speed = snap.velocity.dot(fwd);
+        let track = shell.sim.track().clone();
+        shell
+            .player_ai
+            .compute_input(snap.pose, snap.heading, fwd_speed, &track)
+    } else {
+        manual_input
+    };
+
+    let snaps = shell.sim.tick(&[player_input_effective]);
     shell.curr_snapshots = snaps;
     if shell.sim.phase() == RacePhase::Racing {
         shell.racing_ticks += 1;
     }
 }
+
+/// Toggles player car autopilot with the T key.
+pub fn toggle_autopilot_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut shell: ResMut<ShellSimulation>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyT) {
+        shell.autopilot = !shell.autopilot;
+    }
+}
+
+/// Frame capture configuration for saving game window screenshots to disk via FFmpeg.
+#[derive(Resource)]
+pub struct FrameCapture {
+    pub output_dir: std::path::PathBuf,
+    pub max_frames: u32,
+    pub frame_count: u32,
+    pub active: bool,
+    pub sender: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+}
+
+impl Default for FrameCapture {
+    fn default() -> Self {
+        let max_frames = std::env::var("TOPDOWN_CAPTURE_FRAMES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3600);
+        Self {
+            output_dir: std::path::PathBuf::from("/tmp/topdown_frames"),
+            max_frames,
+            frame_count: 0,
+            active: false,
+            sender: None,
+        }
+    }
+}
+
+/// Captures game window frames and pipes them to FFmpeg rawvideo on stdin,
+/// producing pixel-perfect PNG screenshots of the game window.
+pub fn frame_capture_system(
+    mut capture: ResMut<FrameCapture>,
+    mut screenshot_manager: ResMut<ScreenshotManager>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
+) {
+    if !capture.active {
+        return;
+    }
+    if capture.frame_count >= capture.max_frames {
+        capture.active = false;
+        capture.sender = None;
+        info!(
+            "frame capture complete: {} frames piped to ffmpeg in {}",
+            capture.frame_count,
+            capture.output_dir.display()
+        );
+        return;
+    }
+
+    let Ok((window_entity, window)) = windows.get_single() else {
+        return;
+    };
+
+    if std::fs::create_dir_all(&capture.output_dir).is_err() {
+        capture.active = false;
+        return;
+    }
+
+    // Lazy initialization of the FFmpeg rawvideo child process
+    if capture.sender.is_none() {
+        let width = window.physical_width();
+        let height = window.physical_height();
+        let out_pattern = capture.output_dir.join("frame_%04d.png");
+        let out_str = out_pattern.to_string_lossy().to_string();
+
+        let child = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "bgra",
+                "-video_size",
+                &format!("{width}x{height}"),
+                "-framerate",
+                "60",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "png",
+                &out_str,
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+
+        match child {
+            Ok(mut proc) => {
+                let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    if let Some(mut stdin) = proc.stdin.take() {
+                        while let Ok(frame_data) = rx.recv() {
+                            if stdin.write_all(&frame_data).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    let _ = proc.wait();
+                });
+                capture.sender = Some(tx);
+            }
+            Err(e) => {
+                warn!("failed to spawn ffmpeg: {e}; falling back to direct save");
+            }
+        }
+    }
+
+    capture.frame_count += 1;
+
+    if let Some(tx) = capture.sender.as_ref().cloned() {
+        if screenshot_manager
+            .take_screenshot(window_entity, move |image| {
+                let _ = tx.send(image.data);
+            })
+            .is_err()
+        {
+            capture.frame_count -= 1;
+        }
+    } else {
+        let path = capture
+            .output_dir
+            .join(format!("frame_{:04}.png", capture.frame_count));
+        if screenshot_manager
+            .save_screenshot_to_disk(window_entity, &path)
+            .is_err()
+        {
+            capture.frame_count -= 1;
+        }
+    }
+}
+
 /// Updates camera viewport letterboxing when the window size changes.
 fn update_letterbox(
     windows: Query<&Window, With<PrimaryWindow>>,
