@@ -108,7 +108,10 @@ pub struct ShellSimulation {
 
 impl ShellSimulation {
     pub fn new(track: Track) -> Self {
-        let mut sim = Sim::new_race(track, TOTAL_RACE_CARS);
+        Self::from_sim(Sim::new_race(track, TOTAL_RACE_CARS))
+    }
+
+    fn from_sim(mut sim: Sim) -> Self {
         let initial = sim.tick(&[CarInput::default()]);
         Self {
             sim,
@@ -120,11 +123,7 @@ impl ShellSimulation {
     /// Rebuilds a fresh race starting from the countdown phase.
     pub fn reset_to_fresh_race(&mut self) {
         let track = self.sim.track().clone();
-        let mut sim = Sim::new_race(track, TOTAL_RACE_CARS);
-        let initial = sim.tick(&[CarInput::default()]);
-        self.sim = sim;
-        self.prev_snapshots = initial.clone();
-        self.curr_snapshots = initial;
+        *self = Self::from_sim(Sim::new_race(track, TOTAL_RACE_CARS));
     }
 }
 
@@ -670,16 +669,28 @@ pub fn reset_race_on_enter(mut shell: ResMut<ShellSimulation>) {
     shell.reset_to_fresh_race();
 }
 
-/// Hides the HUD while the menu is shown.
-pub fn hide_hud(mut hud_q: Query<&mut Visibility, With<HudRoot>>) {
+/// Hides the HUD and countdown overlay while the menu is shown.
+pub fn hide_hud(
+    mut hud_q: Query<&mut Visibility, With<HudRoot>>,
+    mut countdown_q: Query<&mut Visibility, (With<CountdownText>, Without<HudRoot>)>,
+) {
     for mut vis in hud_q.iter_mut() {
+        *vis = Visibility::Hidden;
+    }
+    for mut vis in countdown_q.iter_mut() {
         *vis = Visibility::Hidden;
     }
 }
 
-/// Shows the HUD when a race starts.
-pub fn show_hud(mut hud_q: Query<&mut Visibility, With<HudRoot>>) {
+/// Shows the HUD and countdown overlay when a race starts.
+pub fn show_hud(
+    mut hud_q: Query<&mut Visibility, With<HudRoot>>,
+    mut countdown_q: Query<&mut Visibility, (With<CountdownText>, Without<HudRoot>)>,
+) {
     for mut vis in hud_q.iter_mut() {
+        *vis = Visibility::Visible;
+    }
+    for mut vis in countdown_q.iter_mut() {
         *vis = Visibility::Visible;
     }
 }
@@ -775,7 +786,18 @@ pub fn update_countdown_overlay(
     shell: Res<ShellSimulation>,
     mut countdown_q: Query<&mut Text, With<CountdownText>>,
 ) {
-    let text = countdown_display(shell.sim.phase());
+    let text = match shell.sim.phase() {
+        // Clear the green flash once the race is underway.
+        RacePhase::Racing
+            if shell
+                .curr_snapshots
+                .first()
+                .is_some_and(|snap| snap.current_lap_time > 2.0) =>
+        {
+            ""
+        }
+        phase => countdown_display(phase),
+    };
     for mut t in countdown_q.iter_mut() {
         t.sections[0].value = text.to_owned();
     }
@@ -1102,15 +1124,26 @@ mod tests {
     }
 
     #[test]
-    fn countdown_behaves_identically_across_restarts() {
+    fn reset_races_replay_identically_across_restarts() {
         let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
-        let mut sim_a = Sim::new_race(track.clone(), 4);
-        let mut sim_b = Sim::new_race(track, 4);
+        let mut shell_a = ShellSimulation::new(track.clone());
+        let shell_b = ShellSimulation::new(track);
 
+        // Drive shell_a deep into the race, then restart it mid-race.
+        for _ in 0..500 {
+            shell_a.sim.tick(&[CarInput {
+                throttle: 1.0,
+                ..CarInput::default()
+            }]);
+        }
+        shell_a.reset_to_fresh_race();
+
+        // The restarted race must replay identically to a fresh race.
+        let mut shell_b = shell_b;
         for _ in 0..300 {
-            let snaps_a = sim_a.tick(&[CarInput::default()]);
-            let snaps_b = sim_b.tick(&[CarInput::default()]);
-            assert_eq!(snaps_a, snaps_b, "fresh countdowns must behave identically");
+            let snaps_a = shell_a.sim.tick(&[CarInput::default()]);
+            let snaps_b = shell_b.sim.tick(&[CarInput::default()]);
+            assert_eq!(snaps_a, snaps_b, "restarted races must replay identically");
         }
     }
 
