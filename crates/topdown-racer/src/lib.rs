@@ -99,7 +99,7 @@ pub struct ShellSimulation {
     pub sim: Sim,
     pub prev_snapshot: CarSnapshot,
     pub curr_snapshot: CarSnapshot,
-    pub waypoint_index: usize,
+    pub tick_count: u64,
 }
 
 impl ShellSimulation {
@@ -110,7 +110,7 @@ impl ShellSimulation {
             sim,
             prev_snapshot: initial,
             curr_snapshot: initial,
-            waypoint_index: 0,
+            tick_count: 0,
         }
     }
 }
@@ -124,7 +124,7 @@ impl Plugin for RacerGamePlugin {
         app.insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
             .insert_resource(ShellSimulation::new(track))
             .add_systems(Startup, (setup_camera, setup_track, setup_car))
-            .add_systems(FixedUpdate, drive_and_step_simulation)
+            .add_systems(FixedUpdate, step_simulation)
             .add_systems(Update, (update_letterbox, interpolate_car_and_camera));
     }
 }
@@ -275,36 +275,50 @@ fn setup_car(
     ));
 }
 
+/// Deterministic, open-loop scripted inputs driving the verification Car.
+/// Holds zero game rules or closed-loop driver policy.
+pub fn scripted_input_for_tick(tick: u64) -> CarInput {
+    let phase = tick % 320;
+    match phase {
+        0..=79 => CarInput {
+            throttle: 1.0,
+            brake: 0.0,
+            steer: 0.0,
+            handbrake: false,
+        },
+        80..=129 => CarInput {
+            throttle: 0.6,
+            brake: 0.0,
+            steer: 0.75,
+            handbrake: false,
+        },
+        130..=219 => CarInput {
+            throttle: 1.0,
+            brake: 0.0,
+            steer: 0.0,
+            handbrake: false,
+        },
+        220..=269 => CarInput {
+            throttle: 0.6,
+            brake: 0.0,
+            steer: 0.75,
+            handbrake: false,
+        },
+        _ => CarInput {
+            throttle: 1.0,
+            brake: 0.0,
+            steer: 0.0,
+            handbrake: false,
+        },
+    }
+}
+
 /// Fixed step system: advances the simulation at 64 Hz using scripted inputs for verification.
-fn drive_and_step_simulation(mut shell: ResMut<ShellSimulation>) {
+fn step_simulation(mut shell: ResMut<ShellSimulation>) {
     shell.prev_snapshot = shell.curr_snapshot;
 
-    // Scripted input: follows track waypoints
-    let track = shell.sim.track();
-    let waypoints = &track.points[..track.points.len() - 1];
-    let current_pose = shell.curr_snapshot.pose;
-    let current_heading = shell.curr_snapshot.heading;
-
-    let target = waypoints[shell.waypoint_index % waypoints.len()];
-    let to_target = target - current_pose;
-
-    if to_target.length() < 12.0 {
-        shell.waypoint_index = (shell.waypoint_index + 1) % waypoints.len();
-    }
-
-    let target_angle = to_target.y.atan2(to_target.x);
-    let angle_diff = wrap_angle(target_angle - current_heading);
-
-    let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
-    let throttle = if angle_diff.abs() > 0.5 { 0.5 } else { 1.0 };
-    let brake = if angle_diff.abs() > 1.0 { 0.3 } else { 0.0 };
-
-    let input = CarInput {
-        throttle,
-        brake,
-        steer,
-        handbrake: false,
-    };
+    let input = scripted_input_for_tick(shell.tick_count);
+    shell.tick_count += 1;
 
     let snaps = shell.sim.tick(&[input]);
     shell.curr_snapshot = snaps[0];
@@ -452,5 +466,19 @@ mod tests {
         assert_eq!(cam_tf.translation.x, 20.0);
         assert_eq!(cam_tf.translation.y, 30.0);
         assert_eq!(cam_tf.rotation, Quat::IDENTITY);
+    }
+
+    #[test]
+    fn scripted_input_sequence_is_deterministic_and_open_loop() {
+        let i0 = scripted_input_for_tick(0);
+        assert_eq!(i0.throttle, 1.0);
+        assert_eq!(i0.steer, 0.0);
+
+        let i85 = scripted_input_for_tick(85);
+        assert_eq!(i85.throttle, 0.6);
+        assert_eq!(i85.steer, 0.75);
+
+        // Deterministic cyclic repetition
+        assert_eq!(scripted_input_for_tick(0), scripted_input_for_tick(320));
     }
 }
