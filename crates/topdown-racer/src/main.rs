@@ -12,7 +12,7 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(ClearColor(Color::srgb(0.12, 0.35, 0.12))) // Green grass background
+        .insert_resource(ClearColor(Color::BLACK)) // Black letterbox bars
         .add_plugins(RacerGamePlugin)
         .run();
 }

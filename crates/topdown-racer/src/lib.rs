@@ -4,7 +4,7 @@ use bevy::{prelude::*, render::camera::Viewport, window::PrimaryWindow};
 use glam::Vec2;
 use topdown_racer_core::{
     simulation::{CarInput, CarSnapshot, Sim, FIXED_HZ},
-    track::{Surface, Track},
+    track::{Surface, Track, SAMPLE_CIRCUIT},
 };
 
 /// Canonical aspect ratio for the game view (16:9).
@@ -12,12 +12,6 @@ pub const TARGET_ASPECT_RATIO: f32 = 16.0 / 9.0;
 
 /// Fixed camera zoom (orthographic scale). Smaller value = closer zoom.
 pub const CAMERA_ZOOM: f32 = 0.08;
-
-/// Embedded copy of the sample circuit JSON data.
-pub const SAMPLE_CIRCUIT_JSON: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../core/data/tracks/sample-circuit.json"
-));
 
 /// Rectangular viewport region for letterboxing/pillarboxing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,17 +63,21 @@ pub fn compute_letterbox_viewport(
     }
 }
 
+/// Wraps an angle delta to the range $[-\pi, \pi]$ taking the shortest rotational path.
+pub fn wrap_angle(mut delta: f32) -> f32 {
+    while delta > std::f32::consts::PI {
+        delta -= 2.0 * std::f32::consts::PI;
+    }
+    while delta < -std::f32::consts::PI {
+        delta += 2.0 * std::f32::consts::PI;
+    }
+    delta
+}
+
 /// Smoothly interpolates an angle in radians between `prev` and `curr` taking
 /// the shortest rotational path across the $[-\pi, \pi]$ boundary.
 pub fn interpolate_heading(prev: f32, curr: f32, alpha: f32) -> f32 {
-    let mut diff = curr - prev;
-    while diff > std::f32::consts::PI {
-        diff -= 2.0 * std::f32::consts::PI;
-    }
-    while diff < -std::f32::consts::PI {
-        diff += 2.0 * std::f32::consts::PI;
-    }
-    prev + diff * alpha
+    prev + wrap_angle(curr - prev) * alpha
 }
 
 /// Interpolates 2D world position.
@@ -93,9 +91,7 @@ pub struct FollowCamera;
 
 /// Component tagging the rendered Car chassis.
 #[derive(Component)]
-pub struct CarVisual {
-    pub car_index: usize,
-}
+pub struct CarVisual;
 
 /// Resource holding simulation state and consecutive snapshots for render interpolation.
 #[derive(Resource)]
@@ -124,11 +120,11 @@ pub struct RacerGamePlugin;
 
 impl Plugin for RacerGamePlugin {
     fn build(&self, app: &mut App) {
-        let track = Track::parse(SAMPLE_CIRCUIT_JSON).expect("sample circuit must parse");
+        let track = Track::parse(SAMPLE_CIRCUIT).expect("sample circuit must parse");
         app.insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
             .insert_resource(ShellSimulation::new(track))
             .add_systems(Startup, (setup_camera, setup_track, setup_car))
-            .add_systems(FixedUpdate, step_simulation)
+            .add_systems(FixedUpdate, drive_and_step_simulation)
             .add_systems(Update, (update_letterbox, interpolate_car_and_camera));
     }
 }
@@ -148,6 +144,16 @@ fn setup_track(
     let track = sim.sim.track();
     let points = &track.points;
     let n = points.len() - 1;
+
+    // Background grass field behind the track
+    let grass_mesh = meshes.add(Rectangle::new(1400.0, 900.0));
+    let grass_mat = materials.add(Color::srgb(0.12, 0.35, 0.12));
+    commands.spawn(ColorMesh2dBundle {
+        mesh: grass_mesh.into(),
+        material: grass_mat,
+        transform: Transform::from_xyz(0.0, 0.0, 0.0),
+        ..default()
+    });
 
     let road_mat = materials.add(Color::srgb(0.22, 0.22, 0.26));
     let gravel_mat = materials.add(Color::srgb(0.48, 0.40, 0.28));
@@ -265,12 +271,12 @@ fn setup_car(
             .with_rotation(Quat::from_rotation_z(sim.curr_snapshot.heading)),
             ..default()
         },
-        CarVisual { car_index: 0 },
+        CarVisual,
     ));
 }
 
 /// Fixed step system: advances the simulation at 64 Hz using scripted inputs for verification.
-fn step_simulation(mut shell: ResMut<ShellSimulation>) {
+fn drive_and_step_simulation(mut shell: ResMut<ShellSimulation>) {
     shell.prev_snapshot = shell.curr_snapshot;
 
     // Scripted input: follows track waypoints
@@ -287,13 +293,7 @@ fn step_simulation(mut shell: ResMut<ShellSimulation>) {
     }
 
     let target_angle = to_target.y.atan2(to_target.x);
-    let mut angle_diff = target_angle - current_heading;
-    while angle_diff > std::f32::consts::PI {
-        angle_diff -= 2.0 * std::f32::consts::PI;
-    }
-    while angle_diff < -std::f32::consts::PI {
-        angle_diff += 2.0 * std::f32::consts::PI;
-    }
+    let angle_diff = wrap_angle(target_angle - current_heading);
 
     let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
     let throttle = if angle_diff.abs() > 0.5 { 0.5 } else { 1.0 };
@@ -368,6 +368,19 @@ fn interpolate_car_and_camera(
 mod tests {
     use super::*;
 
+    const SAMPLE_TRACK_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../core/data/tracks/sample-circuit.json"
+    );
+
+    /// The sample circuit ships as a real data file next to the crate, not
+    /// just as an embedded string.
+    #[test]
+    fn sample_track_data_ships_on_disk_and_parses() {
+        let text = std::fs::read_to_string(SAMPLE_TRACK_PATH).unwrap();
+        topdown_racer_core::track::Track::parse(&text).unwrap();
+    }
+
     #[test]
     fn letterbox_viewport_exact_aspect_ratio_fills_window() {
         let vp = compute_letterbox_viewport(1920, 1080, 16.0 / 9.0);
@@ -379,7 +392,6 @@ mod tests {
 
     #[test]
     fn letterbox_viewport_wider_window_adds_pillarbox() {
-        // Ultra-wide 2560x1080 -> 16:9 viewport should be 1920x1080, centered
         let vp = compute_letterbox_viewport(2560, 1080, 16.0 / 9.0);
         assert_eq!(vp.width, 1920);
         assert_eq!(vp.height, 1080);
@@ -389,12 +401,19 @@ mod tests {
 
     #[test]
     fn letterbox_viewport_taller_window_adds_letterbox() {
-        // 1080x1920 portrait -> 16:9 viewport should be 1080 wide, 608 high, centered vertically
         let vp = compute_letterbox_viewport(1080, 1920, 16.0 / 9.0);
         assert_eq!(vp.width, 1080);
         assert_eq!(vp.height, 608);
         assert_eq!(vp.x, 0);
         assert_eq!(vp.y, (1920 - 608) / 2);
+    }
+
+    #[test]
+    fn wrap_angle_normalizes_to_pi_range() {
+        assert_eq!(wrap_angle(0.0), 0.0);
+        let pi = std::f32::consts::PI;
+        assert!((wrap_angle(pi + 0.1) - (-pi + 0.1)).abs() < 1e-5);
+        assert!((wrap_angle(-pi - 0.1) - (pi - 0.1)).abs() < 1e-5);
     }
 
     #[test]
@@ -410,9 +429,7 @@ mod tests {
     fn interpolate_heading_crosses_pi_boundary_smoothly() {
         let prev = 3.10; // close to +pi
         let curr = -3.10; // close to -pi
-                          // Total angular distance the short way is ~0.083 rad
         let mid = interpolate_heading(prev, curr, 0.5);
-        // Midpoint should be near pi / -pi, not 0.0!
         assert!(
             mid.abs() > 3.0,
             "midpoint across boundary must stay near +/- pi: got {}",
@@ -421,16 +438,19 @@ mod tests {
     }
 
     #[test]
-    fn camera_follows_car_without_rotating_world() {
-        let car_pose = Vec2::new(123.4, -56.7);
+    fn follow_camera_transform_tracks_car_pose_with_identity_rotation() {
+        let p0 = Vec2::new(10.0, 20.0);
+        let p1 = Vec2::new(30.0, 40.0);
+        let alpha = 0.5;
+        let interp = interpolate_pose(p0, p1, alpha);
+
         let mut cam_tf = Transform::from_xyz(0.0, 0.0, 999.0);
-        // Camera update logic:
-        cam_tf.translation.x = car_pose.x;
-        cam_tf.translation.y = car_pose.y;
+        cam_tf.translation.x = interp.x;
+        cam_tf.translation.y = interp.y;
         cam_tf.rotation = Quat::IDENTITY;
 
-        assert_eq!(cam_tf.translation.x, car_pose.x);
-        assert_eq!(cam_tf.translation.y, car_pose.y);
+        assert_eq!(cam_tf.translation.x, 20.0);
+        assert_eq!(cam_tf.translation.y, 30.0);
         assert_eq!(cam_tf.rotation, Quat::IDENTITY);
     }
 }
