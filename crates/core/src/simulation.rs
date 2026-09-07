@@ -170,12 +170,18 @@ impl Sim {
         // Phase management: countdown progression
         let controls_locked = match &mut self.phase {
             RacePhase::Countdown { ticks_remaining } => {
-                if *ticks_remaining > 1 {
+                if *ticks_remaining > 0 {
                     *ticks_remaining -= 1;
+                    if *ticks_remaining == 0 {
+                        self.phase = RacePhase::Racing;
+                        false
+                    } else {
+                        true
+                    }
                 } else {
                     self.phase = RacePhase::Racing;
+                    false
                 }
-                true
             }
             RacePhase::Racing | RacePhase::Finished => false,
         };
@@ -202,7 +208,12 @@ impl Sim {
 
                 let target_cp = car.next_checkpoint;
                 let cp_pos = self.track.points[target_cp];
-                if (car.pose - cp_pos).length() < cp_radius {
+                let entry_dir = if target_cp == 0 {
+                    cp_pos - self.track.points[total_cps - 1]
+                } else {
+                    cp_pos - self.track.points[target_cp - 1]
+                };
+                if (car.pose - cp_pos).length() < cp_radius && car.velocity.dot(entry_dir) > 0.0 {
                     car.last_cleared_checkpoint = target_cp;
                     if target_cp == 0 {
                         // Crossed start/finish having visited all checkpoints in order
@@ -534,6 +545,44 @@ mod tests {
         }
         snaps
     }
+    fn drive_step_towards_waypoints(
+        sim: &mut Sim,
+        waypoints: &[Vec2],
+        current_wp: &mut usize,
+        last_pose: &mut Vec2,
+        last_heading: &mut f32,
+    ) -> CarSnapshot {
+        let target = waypoints[*current_wp];
+        let to_target = target - *last_pose;
+        let target_angle = to_target.y.atan2(to_target.x);
+        let mut angle_diff = target_angle - *last_heading;
+        while angle_diff > std::f32::consts::PI {
+            angle_diff -= 2.0 * std::f32::consts::PI;
+        }
+        while angle_diff < -std::f32::consts::PI {
+            angle_diff += 2.0 * std::f32::consts::PI;
+        }
+
+        let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
+        let throttle = if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 };
+        let brake = if angle_diff.abs() > 0.8 { 0.3 } else { 0.0 };
+
+        let snap = sim.tick(&[CarInput {
+            throttle,
+            brake,
+            steer,
+            handbrake: false,
+        }])[0];
+        *last_pose = snap.pose;
+        *last_heading = snap.heading;
+
+        if (target - snap.pose).length() < 14.0 {
+            *current_wp = (*current_wp + 1) % waypoints.len();
+        }
+
+        snap
+    }
+
     #[test]
     fn held_throttle_accelerates_the_car_from_rest() {
         let inputs = vec![hold(1.0, 0.0, 0.0); FIXED_HZ as usize];
@@ -1160,37 +1209,16 @@ mod tests {
 
         // Drive for up to 1800 ticks
         for _ in 0..1800 {
-            let target = waypoints[current_wp];
-            let to_target = target - last_pose;
-            let target_angle = to_target.y.atan2(to_target.x);
-            let mut angle_diff = target_angle - last_heading;
-            while angle_diff > std::f32::consts::PI {
-                angle_diff -= 2.0 * std::f32::consts::PI;
-            }
-            while angle_diff < -std::f32::consts::PI {
-                angle_diff += 2.0 * std::f32::consts::PI;
-            }
-
-            let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
-            let throttle = if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 };
-            let brake = if angle_diff.abs() > 0.8 { 0.3 } else { 0.0 };
-
-            let snap = sim.tick(&[CarInput {
-                throttle,
-                brake,
-                steer,
-                handbrake: false,
-            }])[0];
-            last_pose = snap.pose;
-            last_heading = snap.heading;
-
+            let snap = drive_step_towards_waypoints(
+                &mut sim,
+                waypoints,
+                &mut current_wp,
+                &mut last_pose,
+                &mut last_heading,
+            );
             if snap.completed_laps >= 1 {
                 completed_lap_snap = Some(snap);
                 break;
-            }
-
-            if (target - snap.pose).length() < 14.0 {
-                current_wp = (current_wp + 1) % waypoints.len();
             }
         }
 
@@ -1282,37 +1310,16 @@ mod tests {
         let mut final_snap = None;
 
         for _ in 0..5000 {
-            let target = waypoints[current_wp];
-            let to_target = target - last_pose;
-            let target_angle = to_target.y.atan2(to_target.x);
-            let mut angle_diff = target_angle - last_heading;
-            while angle_diff > std::f32::consts::PI {
-                angle_diff -= 2.0 * std::f32::consts::PI;
-            }
-            while angle_diff < -std::f32::consts::PI {
-                angle_diff += 2.0 * std::f32::consts::PI;
-            }
-
-            let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
-            let throttle = if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 };
-            let brake = if angle_diff.abs() > 0.8 { 0.3 } else { 0.0 };
-
-            let snap = sim.tick(&[CarInput {
-                throttle,
-                brake,
-                steer,
-                handbrake: false,
-            }])[0];
-            last_pose = snap.pose;
-            last_heading = snap.heading;
+            let snap = drive_step_towards_waypoints(
+                &mut sim,
+                waypoints,
+                &mut current_wp,
+                &mut last_pose,
+                &mut last_heading,
+            );
             final_snap = Some(snap);
-
             if snap.phase == RacePhase::Finished {
                 break;
-            }
-
-            if (target - snap.pose).length() < 14.0 {
-                current_wp = (current_wp + 1) % waypoints.len();
             }
         }
 
