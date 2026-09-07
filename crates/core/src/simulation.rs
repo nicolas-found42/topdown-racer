@@ -104,8 +104,8 @@ struct CarState {
     last_cleared_checkpoint: usize,
     lap_times: [Option<f32>; TOTAL_LAPS as usize],
     best_lap_time: Option<f32>,
+    ai: Option<AiDriver>,
 }
-
 impl Sim {
     /// Builds a sim with `car_count` Cars staged behind the Track's start
     /// line, starting in the `Racing` phase.
@@ -113,15 +113,17 @@ impl Sim {
         Self::new_with_phase(track, car_count, RacePhase::Racing)
     }
 
-    /// Builds a full race sim starting in the `Countdown` phase.
+    /// Builds a full race sim starting in the `Countdown` phase with AI opponents.
     pub fn new_race(track: Track, car_count: usize) -> Sim {
-        Self::new_with_phase(
+        let mut sim = Self::new_with_phase(
             track,
             car_count,
             RacePhase::Countdown {
                 ticks_remaining: DEFAULT_COUNTDOWN_TICKS,
             },
-        )
+        );
+        sim.enable_ai_opponents();
+        sim
     }
 
     /// Builds a sim with an explicit initial `RacePhase`.
@@ -141,9 +143,17 @@ impl Sim {
                 last_cleared_checkpoint: 0,
                 lap_times: [None; TOTAL_LAPS as usize],
                 best_lap_time: None,
+                ai: None,
             })
             .collect();
         Sim { track, cars, phase }
+    }
+
+    /// Enables AI driver controllers for trailing cars (indices 1..car_count).
+    pub fn enable_ai_opponents(&mut self) {
+        for (i, car) in self.cars.iter_mut().enumerate().skip(1) {
+            car.ai = Some(AiDriver::new(i));
+        }
     }
 
     /// The parsed Track this sim runs on.
@@ -185,21 +195,27 @@ impl Sim {
             }
             RacePhase::Racing | RacePhase::Finished => false,
         };
-
-        let total_cps = (self.track.points.len() - 1).max(1);
+        let total_cps = self.track.points.len() - 1;
         let cp_radius = self.track.wall_distance() * 1.5;
 
         // Step all cars
         let mut step_results = Vec::with_capacity(self.cars.len());
         for (i, car) in self.cars.iter_mut().enumerate() {
-            let raw_input = inputs.get(i).copied().unwrap_or_default();
-            let effective_input = if controls_locked {
+            let raw_input = if controls_locked {
                 CarInput::default()
+            } else if let Some(ai) = &mut car.ai {
+                if inputs.len() > i {
+                    inputs[i]
+                } else {
+                    let fwd = forward(car.heading);
+                    let fwd_speed = car.velocity.dot(fwd);
+                    ai.compute_input(car.pose, car.heading, fwd_speed, &self.track)
+                }
             } else {
-                raw_input
+                inputs.get(i).copied().unwrap_or_default()
             };
 
-            let (surface, wall_contact, drifting) = step_car(car, effective_input, &self.track);
+            let (surface, wall_contact, drifting) = step_car(car, raw_input, &self.track);
             step_results.push((surface, wall_contact, drifting));
 
             // In Racing phase, accumulate lap time and check ordered progress
@@ -230,6 +246,30 @@ impl Sim {
                         car.next_checkpoint = 1;
                     } else {
                         car.next_checkpoint = (target_cp + 1) % total_cps;
+                    }
+                }
+            }
+        }
+
+        // Car-to-Car collisions: pairwise sphere collision response
+        let num_cars = self.cars.len();
+        for i in 0..num_cars {
+            for j in (i + 1)..num_cars {
+                let delta = self.cars[j].pose - self.cars[i].pose;
+                let dist = delta.length();
+                let min_dist = CAR_COLLISION_RADIUS * 2.0;
+                if dist < min_dist && dist > 0.0001 {
+                    let normal = delta / dist;
+                    let penetration = min_dist - dist;
+                    self.cars[i].pose -= normal * (penetration * 0.5);
+                    self.cars[j].pose += normal * (penetration * 0.5);
+
+                    let rel_vel = self.cars[j].velocity - self.cars[i].velocity;
+                    let vn = rel_vel.dot(normal);
+                    if vn < 0.0 {
+                        let impulse = -(1.0 + CAR_COLLISION_RESTITUTION) * vn * 0.5;
+                        self.cars[i].velocity -= normal * impulse;
+                        self.cars[j].velocity += normal * impulse;
                     }
                 }
             }
@@ -505,6 +545,98 @@ const DRIFT_SPEED_MIN: f32 = 3.0;
 const DRIFT_LATERAL_SLIP_MIN: f32 = 1.2;
 /// Minimum lateral slip speed under handbrake to enter the Drift state.
 const HANDBRAKE_DRIFT_SLIP_MIN: f32 = 0.4;
+/// Bounding circle radius for car-to-car collision resolution.
+pub const CAR_COLLISION_RADIUS: f32 = 1.6;
+/// Coefficient of restitution for car-to-car collisions.
+pub const CAR_COLLISION_RESTITUTION: f32 = 0.5;
+
+/// Fixed AI skill driver following the Track racing line with corner slowdown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AiDriver {
+    pub car_index: usize,
+    pub lateral_offset: f32,
+    pub current_waypoint: usize,
+}
+
+impl AiDriver {
+    pub fn new(car_index: usize) -> Self {
+        let offset_idx = (car_index as isize - 2) as f32;
+        let lateral_offset = offset_idx * 1.2;
+        Self {
+            car_index,
+            lateral_offset,
+            current_waypoint: 1,
+        }
+    }
+
+    pub fn compute_input(
+        &mut self,
+        pose: Vec2,
+        heading: f32,
+        forward_speed: f32,
+        track: &Track,
+    ) -> CarInput {
+        let total_wps = track.points.len() - 1;
+        let wp_idx = self.current_waypoint % total_wps;
+        let prev_wp = if wp_idx == 0 {
+            total_wps - 1
+        } else {
+            wp_idx - 1
+        };
+        let next_wp = (wp_idx + 1) % total_wps;
+
+        let p_prev = track.points[prev_wp];
+        let p_curr = track.points[wp_idx];
+        let p_next = track.points[next_wp];
+
+        let seg_in = (p_curr - p_prev).normalize_or_zero();
+        let seg_out = (p_next - p_curr).normalize_or_zero();
+        let normal = Vec2::new(-seg_in.y, seg_in.x);
+
+        let target = p_curr + normal * self.lateral_offset;
+        let to_target = target - pose;
+
+        if to_target.length() < 14.0 {
+            self.current_waypoint = (self.current_waypoint + 1) % total_wps;
+        }
+
+        let corner_angle = seg_in.angle_between(seg_out).abs();
+        let target_speed = if corner_angle > 0.4 {
+            let sharpness = (corner_angle / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
+            20.0 * (1.0 - sharpness) + 9.0 * sharpness
+        } else {
+            20.0
+        };
+
+        let dist_to_corner = (p_curr - pose).length();
+        let needs_braking = forward_speed > target_speed && dist_to_corner < 42.0;
+
+        let target_angle = to_target.y.atan2(to_target.x);
+        let mut angle_diff = target_angle - heading;
+        while angle_diff > std::f32::consts::PI {
+            angle_diff -= 2.0 * std::f32::consts::PI;
+        }
+        while angle_diff < -std::f32::consts::PI {
+            angle_diff += 2.0 * std::f32::consts::PI;
+        }
+
+        let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
+        let (throttle, brake) = if needs_braking {
+            (0.0, 1.0)
+        } else if angle_diff.abs() > 0.5 {
+            (0.4, 0.0)
+        } else {
+            (1.0, 0.0)
+        };
+
+        CarInput {
+            throttle,
+            brake,
+            steer,
+            handbrake: false,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1354,5 +1486,115 @@ mod tests {
         assert!(last.lap_times[0].is_some());
         assert!(last.lap_times[1].is_some());
         assert!(last.lap_times[2].is_some());
+    }
+
+    #[test]
+    fn all_three_ai_cars_complete_laps_of_the_sample_circuit() {
+        let text = SAMPLE_CIRCUIT;
+        let track = Track::parse(text).unwrap();
+        let mut sim = Sim::new(track, 4);
+        sim.enable_ai_opponents();
+        let mut max_laps = [0u32; 4];
+        for _ in 0..2500 {
+            let snaps = sim.tick(&[CarInput::default()]);
+            for i in 1..=3 {
+                max_laps[i] = max_laps[i].max(snaps[i].completed_laps);
+            }
+        }
+
+        for (i, &laps) in max_laps.iter().enumerate().skip(1) {
+            assert!(
+                laps >= 1,
+                "AI Car {i} must complete at least 1 lap: got {laps}",
+            );
+        }
+    }
+
+    #[test]
+    fn ai_speed_profile_shows_corner_slowdown_on_curved_sections() {
+        let text = SAMPLE_CIRCUIT;
+        let track = Track::parse(text).unwrap();
+        let mut sim = Sim::new(track, 4);
+        sim.enable_ai_opponents();
+
+        let mut max_straight_speed = 0.0f32;
+        let mut min_corner_speed = 100.0f32;
+        for tick in 0..1200 {
+            let snaps = sim.tick(&[CarInput::default()]);
+            let ai_car = snaps[1];
+            let speed = ai_car.forward_speed;
+            // Tick 180..240 is at high speed down the initial straightaway
+            if (180..240).contains(&tick) {
+                max_straight_speed = max_straight_speed.max(speed);
+            }
+            // Tick 280..380 is navigating corner 1
+            if (280..380).contains(&tick) {
+                min_corner_speed = min_corner_speed.min(speed);
+            }
+        }
+
+        assert!(
+            max_straight_speed > 22.0,
+            "AI must reach high speed on straight: {max_straight_speed}"
+        );
+        assert!(
+            min_corner_speed < 15.0,
+            "AI must slow down for corner: {min_corner_speed}"
+        );
+        assert!(
+            max_straight_speed > min_corner_speed + 8.0,
+            "AI must measurably slow for corner versus straight: straight={max_straight_speed}, corner={min_corner_speed}"
+        );
+    }
+
+    #[test]
+    fn identical_seeds_produce_identical_ai_behavior() {
+        let text = SAMPLE_CIRCUIT;
+        let track = Track::parse(text).unwrap();
+        let mut sim_a = Sim::new(track.clone(), 4);
+        sim_a.enable_ai_opponents();
+        let mut sim_b = Sim::new(track, 4);
+        sim_b.enable_ai_opponents();
+
+        for _ in 0..300 {
+            let snaps_a = sim_a.tick(&[CarInput::default()]);
+            let snaps_b = sim_b.tick(&[CarInput::default()]);
+            assert_eq!(
+                snaps_a, snaps_b,
+                "AI simulations must be bit-for-bit deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_cars_collide_with_other_cars_and_bounce() {
+        let straight = straight_track();
+        let mut sim = Sim::new(straight, 2);
+        // Stage Car 0 and Car 1 on colliding courses:
+        // Car 0 at (0, 0) moving +x towards (20, 0)
+        // Car 1 at (20, 0) facing -x moving -x towards (0, 0)
+        sim.cars[0].pose = Vec2::new(0.0, 0.0);
+        sim.cars[0].velocity = Vec2::new(12.0, 0.0);
+        sim.cars[0].heading = 0.0;
+
+        sim.cars[1].pose = Vec2::new(20.0, 0.0);
+        sim.cars[1].velocity = Vec2::new(-12.0, 0.0);
+        sim.cars[1].heading = std::f32::consts::PI;
+
+        let mut observed_bounce = false;
+        for _ in 0..64 {
+            // Pass explicit neutral inputs for both
+            let snaps = sim.tick(&[CarInput::default(), CarInput::default()]);
+            // When they bounce, relative velocity in x reverses (car 0 has negative vx or car 1 has positive vx)
+            if snaps[0].velocity.x < 0.0 && snaps[1].velocity.x > 0.0 {
+                observed_bounce = true;
+                break;
+            }
+        }
+
+        assert!(
+            observed_bounce,
+            "cars must collide and bounce off each other"
+        );
     }
 }
