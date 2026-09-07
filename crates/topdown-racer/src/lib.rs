@@ -89,26 +89,32 @@ pub fn interpolate_pose(prev: Vec2, curr: Vec2, alpha: f32) -> Vec2 {
 #[derive(Component)]
 pub struct FollowCamera;
 
-/// Component tagging the rendered Car chassis.
+/// Component tagging a rendered Car chassis and identifying its car index.
 #[derive(Component)]
-pub struct CarVisual;
+pub struct CarVisual {
+    pub car_index: usize,
+}
+
+/// Total cars in the race: 1 player car + 3 AI opponents.
+pub const TOTAL_RACE_CARS: usize = 4;
 
 /// Resource holding simulation state and consecutive snapshots for render interpolation.
 #[derive(Resource)]
 pub struct ShellSimulation {
     pub sim: Sim,
-    pub prev_snapshot: CarSnapshot,
-    pub curr_snapshot: CarSnapshot,
+    pub prev_snapshots: Vec<CarSnapshot>,
+    pub curr_snapshots: Vec<CarSnapshot>,
 }
 
 impl ShellSimulation {
     pub fn new(track: Track) -> Self {
-        let mut sim = Sim::new(track, 1);
-        let initial = sim.tick(&[CarInput::default()])[0];
+        let mut sim = Sim::new(track, TOTAL_RACE_CARS);
+        sim.enable_ai_opponents();
+        let initial = sim.tick(&[CarInput::default()]);
         Self {
             sim,
-            prev_snapshot: initial,
-            curr_snapshot: initial,
+            prev_snapshots: initial.clone(),
+            curr_snapshots: initial,
         }
     }
 }
@@ -122,10 +128,13 @@ impl Plugin for RacerGamePlugin {
         app.insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
             .insert_resource(ShellSimulation::new(track))
             .init_resource::<PlayerInput>()
-            .add_systems(Startup, (setup_camera, setup_track, setup_car))
+            .add_systems(Startup, (setup_camera, setup_track, setup_car, setup_hud))
             .add_systems(PreUpdate, read_keyboard_input)
             .add_systems(FixedUpdate, step_simulation)
-            .add_systems(Update, (update_letterbox, interpolate_car_and_camera));
+            .add_systems(
+                Update,
+                (update_letterbox, interpolate_car_and_camera, update_hud),
+            );
     }
 }
 
@@ -257,22 +266,26 @@ fn setup_car(
     sim: Res<ShellSimulation>,
 ) {
     let car_mesh = meshes.add(Rectangle::new(4.0, 2.0));
-    let car_mat = materials.add(Color::srgb(0.92, 0.22, 0.22));
+    let colors = [
+        Color::srgb(0.92, 0.22, 0.22), // Player: Red
+        Color::srgb(0.22, 0.45, 0.92), // AI 1: Blue
+        Color::srgb(0.92, 0.82, 0.22), // AI 2: Yellow
+        Color::srgb(0.72, 0.22, 0.92), // AI 3: Purple
+    ];
 
-    commands.spawn((
-        ColorMesh2dBundle {
-            mesh: car_mesh.into(),
-            material: car_mat,
-            transform: Transform::from_xyz(
-                sim.curr_snapshot.pose.x,
-                sim.curr_snapshot.pose.y,
-                10.0,
-            )
-            .with_rotation(Quat::from_rotation_z(sim.curr_snapshot.heading)),
-            ..default()
-        },
-        CarVisual,
-    ));
+    for (i, snap) in sim.curr_snapshots.iter().enumerate() {
+        let mat = materials.add(colors[i % colors.len()]);
+        commands.spawn((
+            ColorMesh2dBundle {
+                mesh: car_mesh.clone().into(),
+                material: mat,
+                transform: Transform::from_xyz(snap.pose.x, snap.pose.y, 10.0 + i as f32 * 0.1)
+                    .with_rotation(Quat::from_rotation_z(snap.heading)),
+                ..default()
+            },
+            CarVisual { car_index: i },
+        ));
+    }
 }
 /// Player input mapped from keyboard devices.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
@@ -327,12 +340,11 @@ pub fn read_keyboard_input(
 
 /// Fixed step system: advances the simulation at 64 Hz using mapped player inputs.
 fn step_simulation(mut shell: ResMut<ShellSimulation>, player_input: Res<PlayerInput>) {
-    shell.prev_snapshot = shell.curr_snapshot;
+    shell.prev_snapshots = shell.curr_snapshots.clone();
 
     let snaps = shell.sim.tick(&[player_input.0]);
-    shell.curr_snapshot = snaps[0];
+    shell.curr_snapshots = snaps;
 }
-
 /// Updates camera viewport letterboxing when the window size changes.
 fn update_letterbox(
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -360,30 +372,204 @@ fn update_letterbox(
 fn interpolate_car_and_camera(
     shell: Res<ShellSimulation>,
     fixed_time: Res<Time<Fixed>>,
-    mut cars: Query<&mut Transform, (With<CarVisual>, Without<FollowCamera>)>,
+    mut cars: Query<(&CarVisual, &mut Transform), Without<FollowCamera>>,
     mut cameras: Query<&mut Transform, (With<FollowCamera>, Without<CarVisual>)>,
 ) {
     let alpha = fixed_time.overstep_fraction();
 
-    let interp_pose = interpolate_pose(shell.prev_snapshot.pose, shell.curr_snapshot.pose, alpha);
-    let interp_heading = interpolate_heading(
-        shell.prev_snapshot.heading,
-        shell.curr_snapshot.heading,
-        alpha,
-    );
+    for (visual, mut car_tf) in cars.iter_mut() {
+        if let (Some(prev), Some(curr)) = (
+            shell.prev_snapshots.get(visual.car_index),
+            shell.curr_snapshots.get(visual.car_index),
+        ) {
+            let interp_pose = interpolate_pose(prev.pose, curr.pose, alpha);
+            let interp_heading = interpolate_heading(prev.heading, curr.heading, alpha);
 
-    // Update Car transform
-    for mut car_tf in cars.iter_mut() {
-        car_tf.translation.x = interp_pose.x;
-        car_tf.translation.y = interp_pose.y;
-        car_tf.rotation = Quat::from_rotation_z(interp_heading);
+            car_tf.translation.x = interp_pose.x;
+            car_tf.translation.y = interp_pose.y;
+            car_tf.rotation = Quat::from_rotation_z(interp_heading);
+
+            // Follow camera tracks player Car (index 0)
+            if visual.car_index == 0 {
+                for mut cam_tf in cameras.iter_mut() {
+                    cam_tf.translation.x = interp_pose.x;
+                    cam_tf.translation.y = interp_pose.y;
+                    cam_tf.rotation = Quat::IDENTITY;
+                }
+            }
+        }
     }
+}
 
-    // Update Follow Camera: follows Car without rotating the world
-    for mut cam_tf in cameras.iter_mut() {
-        cam_tf.translation.x = interp_pose.x;
-        cam_tf.translation.y = interp_pose.y;
-        cam_tf.rotation = Quat::IDENTITY;
+/// Formatted HUD strings derived from simulation snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HudData {
+    pub lap: String,
+    pub position: String,
+    pub current_lap_time: String,
+    pub best_lap_time: String,
+    pub speed: String,
+}
+
+/// Formats a time duration in seconds into `MM:SS.hh`.
+pub fn format_time(seconds: f32) -> String {
+    let total_hundredths = (seconds.max(0.0) * 100.0).round() as u32;
+    let hundredths = total_hundredths % 100;
+    let total_seconds = total_hundredths / 100;
+    let secs = total_seconds % 60;
+    let mins = total_seconds / 60;
+    format!("{:02}:{:02}.{:02}", mins, secs, hundredths)
+}
+
+/// Pure projection function mapping a player snapshot to HUD display data.
+/// Holds zero local game rules or race state logic.
+pub fn format_hud_data(player_snap: &CarSnapshot, total_cars: usize) -> HudData {
+    use topdown_racer_core::simulation::TOTAL_LAPS;
+    let current_lap = (player_snap.completed_laps + 1).min(TOTAL_LAPS);
+    let lap = format!("LAP {}/{}", current_lap, TOTAL_LAPS);
+
+    let pos_suffix = match player_snap.position {
+        1 => "1st",
+        2 => "2nd",
+        3 => "3rd",
+        4 => "4th",
+        _ => "th",
+    };
+    let position = format!("POS {}/{}", pos_suffix, total_cars);
+
+    let current_lap_time = format!("TIME {}", format_time(player_snap.current_lap_time));
+
+    let best_lap_time = match player_snap.best_lap_time {
+        Some(best) => format!("BEST {}", format_time(best)),
+        None => "BEST --:--.--".to_owned(),
+    };
+
+    let speed_val = (player_snap.forward_speed.max(0.0).round()) as u32;
+    let speed = format!("SPEED {}", speed_val);
+
+    HudData {
+        lap,
+        position,
+        current_lap_time,
+        best_lap_time,
+        speed,
+    }
+}
+
+/// Component tagging which HUD field a text element displays.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HudElement {
+    Lap,
+    Position,
+    CurrentTime,
+    BestTime,
+    Speed,
+}
+fn setup_hud(mut commands: Commands) {
+    let text_style = TextStyle {
+        font_size: 20.0,
+        color: Color::WHITE,
+        ..default()
+    };
+
+    commands
+        .spawn(NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                justify_content: JustifyContent::SpaceBetween,
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(16.0)),
+                ..default()
+            },
+            ..default()
+        })
+        .with_children(|root| {
+            // Top bar
+            root.spawn(NodeBundle {
+                style: Style {
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::SpaceBetween,
+                    ..default()
+                },
+                ..default()
+            })
+            .with_children(|top_bar| {
+                // Top-left
+                top_bar
+                    .spawn(NodeBundle {
+                        style: Style {
+                            flex_direction: FlexDirection::Column,
+                            ..default()
+                        },
+                        ..default()
+                    })
+                    .with_children(|left| {
+                        left.spawn((
+                            TextBundle::from_section("LAP 1/3", text_style.clone()),
+                            HudElement::Lap,
+                        ));
+                        left.spawn((
+                            TextBundle::from_section("POS 1st/4", text_style.clone()),
+                            HudElement::Position,
+                        ));
+                    });
+
+                // Top-right
+                top_bar
+                    .spawn(NodeBundle {
+                        style: Style {
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::FlexEnd,
+                            ..default()
+                        },
+                        ..default()
+                    })
+                    .with_children(|right| {
+                        right.spawn((
+                            TextBundle::from_section("TIME 00:00.00", text_style.clone()),
+                            HudElement::CurrentTime,
+                        ));
+                        right.spawn((
+                            TextBundle::from_section("BEST --:--.--", text_style.clone()),
+                            HudElement::BestTime,
+                        ));
+                    });
+            });
+
+            // Bottom bar
+            root.spawn(NodeBundle {
+                style: Style {
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::FlexEnd,
+                    ..default()
+                },
+                ..default()
+            })
+            .with_children(|bottom_bar| {
+                bottom_bar.spawn((
+                    TextBundle::from_section("SPEED 0", text_style.clone()),
+                    HudElement::Speed,
+                ));
+            });
+        });
+}
+
+fn update_hud(shell: Res<ShellSimulation>, mut hud_query: Query<(&HudElement, &mut Text)>) {
+    let Some(player_snap) = shell.curr_snapshots.first() else {
+        return;
+    };
+    let hud = format_hud_data(player_snap, shell.curr_snapshots.len());
+
+    for (element, mut text) in hud_query.iter_mut() {
+        match element {
+            HudElement::Lap => text.sections[0].value = hud.lap.clone(),
+            HudElement::Position => text.sections[0].value = hud.position.clone(),
+            HudElement::CurrentTime => text.sections[0].value = hud.current_lap_time.clone(),
+            HudElement::BestTime => text.sections[0].value = hud.best_lap_time.clone(),
+            HudElement::Speed => text.sections[0].value = hud.speed.clone(),
+        }
     }
 }
 
@@ -572,5 +758,102 @@ mod tests {
             assert_eq!(player_input.0.steer, -1.0);
             assert!(!player_input.0.handbrake);
         }
+    }
+
+    #[test]
+    fn hud_shows_lap_position_time_best_and_speed_formatted_from_snapshot() {
+        use topdown_racer_core::simulation::RacePhase;
+        let snap = CarSnapshot {
+            pose: Vec2::ZERO,
+            heading: 0.0,
+            velocity: Vec2::new(24.2, 0.0),
+            forward_speed: 24.2,
+            surface: Surface::Road,
+            wall_contact: false,
+            drifting: false,
+            phase: RacePhase::Racing,
+            completed_laps: 1, // Currently on lap 2
+            lap_times: [Some(18.45), None, None],
+            current_lap_time: 12.34,
+            best_lap_time: Some(18.45),
+            position: 1,
+        };
+
+        let hud = format_hud_data(&snap, 4);
+        assert_eq!(hud.lap, "LAP 2/3");
+        assert_eq!(hud.position, "POS 1st/4");
+        assert_eq!(hud.current_lap_time, "TIME 00:12.34");
+        assert_eq!(hud.best_lap_time, "BEST 00:18.45");
+        assert_eq!(hud.speed, "SPEED 24");
+    }
+
+    #[test]
+    fn hud_position_updates_when_cars_overtake_each_other() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new(track, 4);
+        sim.enable_ai_opponents();
+
+        // Initially Car 0 (player) is at (0, 0) in 1st place
+        let snaps0 = sim.tick(&[CarInput::default()]);
+        assert_eq!(snaps0[0].position, 1);
+        let hud0 = format_hud_data(&snaps0[0], 4);
+        assert_eq!(hud0.position, "POS 1st/4");
+
+        // AI Car 1 accelerates ahead while Car 0 stays still
+        for _ in 0..100 {
+            sim.tick(&[CarInput::default()]);
+        }
+
+        let snaps1 = sim.tick(&[CarInput::default()]);
+        // AI Car 1 has overtaken Car 0, so Car 0 drops in position
+        assert!(
+            snaps1[0].position > 1,
+            "player position must drop when overtaken"
+        );
+        let hud1 = format_hud_data(&snaps1[0], 4);
+        assert_ne!(
+            hud1.position, "POS 1st/4",
+            "HUD position must update after being overtaken"
+        );
+    }
+
+    #[test]
+    fn hud_values_track_snapshot_exactly_without_local_shell_logic() {
+        use topdown_racer_core::simulation::RacePhase;
+        let mut snap = CarSnapshot {
+            pose: Vec2::ZERO,
+            heading: 0.0,
+            velocity: Vec2::ZERO,
+            forward_speed: 0.0,
+            surface: Surface::Road,
+            wall_contact: false,
+            drifting: false,
+            phase: RacePhase::Racing,
+            completed_laps: 0,
+            lap_times: [None; 3],
+            current_lap_time: 0.0,
+            best_lap_time: None,
+            position: 3,
+        };
+
+        let hud_initial = format_hud_data(&snap, 4);
+        assert_eq!(hud_initial.lap, "LAP 1/3");
+        assert_eq!(hud_initial.position, "POS 3rd/4");
+        assert_eq!(hud_initial.best_lap_time, "BEST --:--.--");
+        assert_eq!(hud_initial.speed, "SPEED 0");
+
+        // Mutate snapshot directly and ensure 1:1 reflection in HUD
+        snap.completed_laps = 2;
+        snap.position = 2;
+        snap.current_lap_time = 65.25;
+        snap.best_lap_time = Some(61.80);
+        snap.forward_speed = 31.7;
+
+        let hud_updated = format_hud_data(&snap, 4);
+        assert_eq!(hud_updated.lap, "LAP 3/3");
+        assert_eq!(hud_updated.position, "POS 2nd/4");
+        assert_eq!(hud_updated.current_lap_time, "TIME 01:05.25");
+        assert_eq!(hud_updated.best_lap_time, "BEST 01:01.80");
+        assert_eq!(hud_updated.speed, "SPEED 32");
     }
 }
