@@ -847,7 +847,8 @@ pub struct SavedBestLap(pub Option<f32>);
 /// File name holding the persisted best lap inside the app config directory.
 pub const BEST_LAP_FILE_NAME: &str = "best_lap.txt";
 
-/// Platform config base directory for local-only storage.
+/// Platform config base directory for local-only storage. Falls back to the current
+/// working directory (`"."`) when standard platform environment variables (HOME / APPDATA / XDG) are unset.
 fn config_base_dir() -> std::path::PathBuf {
     #[cfg(target_os = "windows")]
     {
