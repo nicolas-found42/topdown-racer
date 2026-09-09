@@ -136,6 +136,8 @@ impl Sim {
 
     /// Builds a sim with an explicit initial `RacePhase`.
     pub fn new_with_phase(track: Track, car_count: usize, phase: RacePhase) -> Sim {
+        let total_cps = track.points.len() - 1;
+        let start = track.start_segment;
         let cars = (0..car_count)
             .map(|i| {
                 let pose = track.spawn_pose(i as f32 * CAR_SPACING);
@@ -153,8 +155,8 @@ impl Sim {
                     standstill_ticks: 0,
                     completed_laps: 0,
                     current_lap_ticks: 0,
-                    next_checkpoint: 1,
-                    last_cleared_checkpoint: 0,
+                    next_checkpoint: (start + 1) % total_cps,
+                    last_cleared_checkpoint: start,
                     lap_times: [None; TOTAL_LAPS as usize],
                     best_lap_time: None,
                     ai: None,
@@ -382,6 +384,7 @@ impl SurfacePhysics {
 fn advance_lap_progress(car: &mut CarState, track: &Track, total_cps: usize, cp_radius: f32) {
     car.current_lap_ticks += 1;
 
+    let start = track.start_segment;
     let target_cp = car.next_checkpoint;
     let cp_pos = track.points[target_cp];
     let entry_dir = if target_cp == 0 {
@@ -391,7 +394,7 @@ fn advance_lap_progress(car: &mut CarState, track: &Track, total_cps: usize, cp_
     };
     if (car.pose - cp_pos).length() < cp_radius && car.velocity.dot(entry_dir) > 0.0 {
         car.last_cleared_checkpoint = target_cp;
-        if target_cp == 0 {
+        if target_cp == start {
             // Crossed start/finish having visited all checkpoints in order
             if car.completed_laps < TOTAL_LAPS {
                 let lap_time = car.current_lap_ticks as f32 * FIXED_DT;
@@ -403,26 +406,30 @@ fn advance_lap_progress(car: &mut CarState, track: &Track, total_cps: usize, cp_
                 car.completed_laps += 1;
                 car.current_lap_ticks = 0;
             }
-            car.next_checkpoint = 1;
+            car.next_checkpoint = (start + 1) % total_cps;
         } else {
             car.next_checkpoint = (target_cp + 1) % total_cps;
         }
     }
 }
-
 /// Computes live race positions from progress scores, returning a 1-indexed
 /// position per car (index-aligned with `cars`). Higher completed laps and
 /// cleared checkpoints rank ahead; closer distance to the next checkpoint
 /// breaks ties.
 fn compute_positions(cars: &[CarState], track: &Track) -> Vec<usize> {
+    let total_cps = track.points.len() - 1;
+    let start = track.start_segment;
     let mut car_scores: Vec<(usize, f32)> = cars
         .iter()
         .enumerate()
         .map(|(i, c)| {
             let next_cp = track.points[c.next_checkpoint];
             let dist_to_next = (c.pose - next_cp).length();
-            let score = c.completed_laps as f32 * 10000.0
-                + c.last_cleared_checkpoint as f32 * 100.0
+            // Checkpoints cleared since the start/finish line, so the order
+            // stays monotonic when the line is overridden (identical to the
+            // raw index when the line is at segment 0).
+            let progress = (c.last_cleared_checkpoint + total_cps - start) % total_cps;
+            let score = c.completed_laps as f32 * 10000.0 + progress as f32 * 100.0
                 - (dist_to_next / 1000.0);
             (i, score)
         })
@@ -731,6 +738,10 @@ mod tests {
                 Vec2::new(0.0, 0.0),
             ],
             surfaces: vec![Surface::Road; 4],
+            props: Vec::new(),
+            zones: Vec::new(),
+            theme: crate::track::Theme::Hillside,
+            start_segment: 0,
         }
     }
 
@@ -1958,5 +1969,77 @@ mod tests {
         let snaps = sim.tick(&[hold(0.5, 0.0, -0.5)]);
         assert_eq!(snaps[0].steer, -0.5);
         assert_eq!(sim.snapshots()[0].steer, -0.5);
+    }
+    /// A small square loop with the start/finish line overridden to segment 2
+    /// (the vertex at (100, 100)). Width 20 gives a checkpoint radius of 30.
+    fn overridden_start_track() -> Track {
+        let text = r#"{
+            "name": "Override",
+            "width": 20.0,
+            "points": [[0,0],[100,0],[100,100],[0,100],[0,0]],
+            "surfaces": [],
+            "start_line": {"segment": 2}
+        }"#;
+        Track::parse(text).unwrap()
+    }
+
+    /// Teleports a car onto a checkpoint with lawful entry velocity, then
+    /// steps one tick and returns the snapshot.
+    fn cross_checkpoint(sim: &mut Sim, at: Vec2, velocity: Vec2) -> CarSnapshot {
+        sim.cars[0].pose = at;
+        sim.cars[0].velocity = velocity;
+        sim.tick(&[CarInput::default()])[0]
+    }
+
+    #[test]
+    fn overridden_start_line_shifts_grid_spawn() {
+        let track = overridden_start_track();
+        assert_eq!(track.start_segment, 2);
+        let mut sim = Sim::new(track.clone(), 3);
+        let snaps = sim.tick(&[]);
+
+        // Lead car stages exactly on the overridden line's vertex.
+        assert_eq!(snaps[0].pose, Vec2::new(100.0, 100.0));
+        // Trailing cars stage behind the line along the loop, facing the
+        // leg they stage on (+y up segment 1).
+        assert_eq!(snaps[1].pose, track.spawn_pose(5.0));
+        assert_eq!(snaps[1].pose, Vec2::new(100.0, 95.0));
+        assert_eq!(snaps[2].pose, track.spawn_pose(10.0));
+        for snap in &snaps {
+            assert!(
+                (snap.heading - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+                "grid must face the overridden leg, got {}",
+                snap.heading
+            );
+        }
+    }
+
+    #[test]
+    fn overridden_start_line_shifts_lap_origin_and_completion() {
+        let track = overridden_start_track();
+        let mut sim = Sim::new(track, 1);
+
+        // Crossing the old line (vertex 0) out of order clears nothing.
+        let snap = cross_checkpoint(&mut sim, Vec2::new(0.0, 0.0), Vec2::new(0.0, -10.0));
+        assert_eq!(snap.completed_laps, 0);
+        // Teleporting straight onto the overridden line out of order clears
+        // nothing either.
+        let snap = cross_checkpoint(&mut sim, Vec2::new(100.0, 100.0), Vec2::new(0.0, 10.0));
+        assert_eq!(snap.completed_laps, 0);
+
+        // Walk the ordered checkpoints starting after the overridden line:
+        // 3 -> 0 -> 1 -> 2 completes exactly one lap at the overridden line.
+        let legs = [
+            (Vec2::new(0.0, 100.0), Vec2::new(-10.0, 0.0)),
+            (Vec2::new(0.0, 0.0), Vec2::new(0.0, -10.0)),
+            (Vec2::new(100.0, 0.0), Vec2::new(10.0, 0.0)),
+        ];
+        for (at, velocity) in legs {
+            let snap = cross_checkpoint(&mut sim, at, velocity);
+            assert_eq!(snap.completed_laps, 0);
+        }
+        let snap = cross_checkpoint(&mut sim, Vec2::new(100.0, 100.0), Vec2::new(0.0, 10.0));
+        assert_eq!(snap.completed_laps, 1);
+        assert!(snap.lap_times[0].is_some());
     }
 }

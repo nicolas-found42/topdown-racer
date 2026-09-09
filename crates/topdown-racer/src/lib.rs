@@ -40,7 +40,7 @@ use glam::Vec2;
 use topdown_racer_core::{
     ai::AiDriver,
     simulation::{CarInput, CarSnapshot, Sim, FIXED_HZ},
-    track::{Surface, Track, SAMPLE_CIRCUIT},
+    track::{PropKind, Surface, Track, ZoneKind, SAMPLE_CIRCUIT},
 };
 
 use audio::setup_audio;
@@ -53,9 +53,9 @@ pub const TARGET_ASPECT_RATIO: f32 = 16.0 / 9.0;
 /// Fixed camera zoom (orthographic scale). Smaller value = closer zoom.
 pub const CAMERA_ZOOM: f32 = 0.05;
 
-/// Component tagging a rendered Car chassis and identifying its car index.
+/// Component tagging a rendered Car Sprite and identifying its car index.
 #[derive(Component)]
-pub struct CarVisual {
+pub struct CarSprite {
     pub car_index: usize,
 }
 
@@ -204,6 +204,12 @@ fn setup_track(
     let kerb_red = materials.add(Color::srgb(0.85, 0.18, 0.18));
     let kerb_white = materials.add(Color::srgb(0.95, 0.95, 0.95));
     let guardrail_mat = materials.add(Color::srgb(0.72, 0.75, 0.80));
+    let sand_mat = materials.add(Color::srgb(0.76, 0.70, 0.50));
+    let dirt_mat = materials.add(Color::srgb(0.45, 0.33, 0.20));
+    let dark_grass_mat = materials.add(Color::srgb(0.08, 0.25, 0.10));
+    let tree_mat = materials.add(Color::srgb(0.10, 0.45, 0.15));
+    let tire_stack_mat = materials.add(Color::srgb(0.15, 0.15, 0.17));
+    let brake_board_mat = materials.add(Color::srgb(0.80, 0.15, 0.15));
 
     // All quad math comes from the pure geometry seam; this system only
     // chooses materials and z-ordering.
@@ -247,6 +253,22 @@ fn setup_track(
             black_mat.clone()
         };
         spawn_quad(&mut commands, &mut meshes, *quad, mat, 1.4);
+    }
+    for zone_quad in &geo.zones {
+        let mat = match zone_quad.kind {
+            ZoneKind::Sand => sand_mat.clone(),
+            ZoneKind::Dirt => dirt_mat.clone(),
+            ZoneKind::DarkGrass => dark_grass_mat.clone(),
+        };
+        spawn_quad(&mut commands, &mut meshes, zone_quad.quad, mat, 0.5);
+    }
+    for prop_quad in &geo.props {
+        let mat = match prop_quad.kind {
+            PropKind::Tree => tree_mat.clone(),
+            PropKind::TireStack => tire_stack_mat.clone(),
+            PropKind::BrakeBoard => brake_board_mat.clone(),
+        };
+        spawn_quad(&mut commands, &mut meshes, prop_quad.quad, mat, 3.0);
     }
 }
 
@@ -336,7 +358,7 @@ fn setup_car(
                         .with_rotation(Quat::from_rotation_z(snap.heading)),
                     ..default()
                 },
-                CarVisual { car_index: i },
+                CarSprite { car_index: i },
             ))
             .with_children(|car| {
                 // 4 Real Rubber Tires; the front axle (x = +1.3) carries a

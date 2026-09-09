@@ -6,14 +6,13 @@
 //! this geometry and adds meshes/materials.
 
 use glam::Vec2;
-use topdown_racer_core::track::{Surface, Track};
+use topdown_racer_core::track::{PropKind, Surface, Track, ZoneKind};
 
 /// One planar quad: top-left, top-right, bottom-right, bottom-left corners.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Quad {
     pub verts: [Vec2; 4],
 }
-
 impl Quad {
     fn new(tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2) -> Self {
         Self {
@@ -27,6 +26,22 @@ impl Quad {
 pub struct RoadQuad {
     pub quad: Quad,
     pub surface: Surface,
+}
+
+/// A terrain-zone fill quad tagged with the zone kind (material choice).
+/// Fan-triangulated from the authored polygon; a triangle zone emits one
+/// degenerate quad with two coincident corners.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ZoneQuad {
+    pub quad: Quad,
+    pub kind: ZoneKind,
+}
+
+/// A decor-prop placeholder quad tagged with the prop kind (material choice).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropQuad {
+    pub quad: Quad,
+    pub kind: PropKind,
 }
 
 /// All render geometry for one Track, in deterministic spawn order.
@@ -44,6 +59,10 @@ pub struct TrackRenderGeometry {
     pub guardrails: Vec<Quad>,
     /// Checkered start/finish squares, alternating white/black by (row, col).
     pub start_line: Vec<Quad>,
+    /// Terrain-zone fill quads in author order, fan-triangulated per zone.
+    pub zones: Vec<ZoneQuad>,
+    /// Decor-prop placeholder quads in author order, centered on the prop.
+    pub props: Vec<PropQuad>,
 }
 
 /// Computes all render geometry for a closed polyline circuit.
@@ -206,13 +225,14 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
         ));
     }
 
-    // Checkered start/finish line across the opening straight, just past the
-    // corner exit: clear of the crossing leg's asphalt, and the whole grid
-    // stages behind it.
+    // Checkered start/finish line across the start segment's straight, just
+    // past the corner exit: clear of the crossing leg's asphalt, and the
+    // whole grid stages behind it.
     if n > 0 {
-        let dir = seg_dirs[0];
-        let normal = seg_normals[0];
-        let line_center = points[0] + dir * (road_half_w + 3.0);
+        let s = track.start_segment.min(n - 1);
+        let dir = seg_dirs[s];
+        let normal = seg_normals[s];
+        let line_center = points[s] + dir * (road_half_w + 3.0);
         let checkers_count = 10;
         let checker_w = (road_half_w * 2.0) / checkers_count as f32;
         for row in 0..2 {
@@ -229,6 +249,37 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
             }
         }
     }
+    // Terrain zones fan-triangulate in author order: each (v0, vi, vi+1)
+    // triangle emits one quad with two coincident corners so the existing
+    // quad spawn path works unchanged.
+    for zone in &track.zones {
+        let poly = &zone.polygon;
+        if poly.len() < 3 {
+            continue;
+        }
+        for i in 1..poly.len() - 1 {
+            geo.zones.push(ZoneQuad {
+                quad: Quad::new(poly[0], poly[i], poly[i + 1], poly[i + 1]),
+                kind: zone.kind,
+            });
+        }
+    }
+
+    // Decor props render as small placeholder quads centered on the prop,
+    // rotated to the authored facing. Half-extent 1.0 clears the road edge
+    // line without dwarfing nearby kerbs.
+    for prop in &track.props {
+        let (sin, cos) = prop.rotation.sin_cos();
+        let corners = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)];
+        let verts =
+            corners.map(|(x, y)| prop.position + Vec2::new(x * cos - y * sin, x * sin + y * cos));
+        geo.props.push(PropQuad {
+            quad: Quad {
+                verts: [verts[0], verts[1], verts[2], verts[3]],
+            },
+            kind: prop.kind,
+        });
+    }
 
     geo
 }
@@ -236,7 +287,7 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use topdown_racer_core::track::SAMPLE_CIRCUIT;
+    use topdown_racer_core::track::{PropKind, ZoneKind, SAMPLE_CIRCUIT};
 
     #[test]
     fn sample_circuit_geometry_counts_match_segments_and_grid() {
@@ -269,6 +320,8 @@ mod tests {
             .chain(geo.kerbs.iter().copied())
             .chain(geo.guardrails.iter().copied())
             .chain(geo.start_line.iter().copied())
+            .chain(geo.zones.iter().map(|z| z.quad))
+            .chain(geo.props.iter().map(|p| p.quad))
             .collect();
         assert!(!all.is_empty());
         for quad in all {
@@ -300,5 +353,106 @@ mod tests {
         let geo = build_track_geometry(&track);
         assert_eq!(geo.road.len(), 5);
         assert_eq!(geo.guardrails.len(), 5);
+    }
+    /// A v2 track: quad sand zone, triangle dirt zone, two props, and the
+    /// start line overridden to segment 1.
+    fn v2_track() -> Track {
+        let text = r#"{
+            "name": "V2 Geo",
+            "width": 10.0,
+            "points": [[0,0],[40,0],[40,40],[0,0]],
+            "surfaces": [],
+            "props": [
+                {"type": "tree", "position": [50.0, 50.0]},
+                {"type": "tire_stack", "position": [60.0, 60.0], "rotation_degrees": 90.0}
+            ],
+            "terrain_zones": [
+                {"kind": "sand", "polygon": [[100,100],[110,100],[110,110],[100,110]]},
+                {"kind": "dirt", "polygon": [[200,200],[210,200],[205,210]]}
+            ],
+            "theme": "hillside",
+            "start_line": {"segment": 1}
+        }"#;
+        Track::parse(text).unwrap()
+    }
+
+    fn quad_center(quad: Quad) -> Vec2 {
+        (quad.verts[0] + quad.verts[1] + quad.verts[2] + quad.verts[3]) * 0.25
+    }
+
+    #[test]
+    fn zones_fan_triangulate_in_author_order() {
+        let geo = build_track_geometry(&v2_track());
+        // Quad zone fans into 2 quads, triangle zone into 1 degenerate quad
+        // (two coincident corners) so the quad spawn path works unchanged.
+        assert_eq!(geo.zones.len(), 3);
+        assert_eq!(geo.zones[0].kind, ZoneKind::Sand);
+        assert_eq!(geo.zones[1].kind, ZoneKind::Sand);
+        assert_eq!(geo.zones[2].kind, ZoneKind::Dirt);
+        // Fan order: first quad spans v0/v1/v2 of the sand polygon.
+        assert_eq!(geo.zones[0].quad.verts[0], Vec2::new(100.0, 100.0));
+        assert_eq!(geo.zones[0].quad.verts[1], Vec2::new(110.0, 100.0));
+        assert_eq!(geo.zones[0].quad.verts[2], Vec2::new(110.0, 110.0));
+        // Triangle zone emits one quad with two coincident corners.
+        assert_eq!(geo.zones[2].quad.verts[2], geo.zones[2].quad.verts[3]);
+        // Tracks without zones render none; geometry stays deterministic.
+        let plain = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        assert!(build_track_geometry(&plain).zones.is_empty());
+        assert_eq!(build_track_geometry(&v2_track()), geo);
+    }
+
+    #[test]
+    fn props_emit_centered_placeholder_quads_in_order() {
+        let geo = build_track_geometry(&v2_track());
+        assert_eq!(geo.props.len(), 2);
+        assert_eq!(geo.props[0].kind, PropKind::Tree);
+        assert_eq!(geo.props[1].kind, PropKind::TireStack);
+        for (prop_quad, at) in geo
+            .props
+            .iter()
+            .zip([Vec2::new(50.0, 50.0), Vec2::new(60.0, 60.0)])
+        {
+            assert!(
+                (quad_center(prop_quad.quad) - at).length() < 1e-3,
+                "prop quad must center on its position, got {:?}",
+                prop_quad.quad.verts
+            );
+            for v in prop_quad.quad.verts {
+                assert!(v.is_finite());
+            }
+        }
+        let plain = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        assert!(build_track_geometry(&plain).props.is_empty());
+    }
+
+    #[test]
+    fn start_line_moves_to_the_overridden_segment() {
+        let track = v2_track();
+        let geo = build_track_geometry(&track);
+        assert_eq!(geo.start_line.len(), 20);
+        // Segment 1 runs (40,0) -> (40,40): line center sits 8 units past
+        // the vertex along +y (road half-width 5 + 3).
+        let centroid = geo
+            .start_line
+            .iter()
+            .fold(Vec2::ZERO, |acc, q| acc + quad_center(*q))
+            / geo.start_line.len() as f32;
+        assert!(
+            (centroid - Vec2::new(40.0, 8.0)).length() < 1e-3,
+            "start line must center on segment 1, got {centroid:?}"
+        );
+
+        // Default tracks keep the line on the opening straight.
+        let plain = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let plain_geo = build_track_geometry(&plain);
+        let plain_centroid = plain_geo
+            .start_line
+            .iter()
+            .fold(Vec2::ZERO, |acc, q| acc + quad_center(*q))
+            / plain_geo.start_line.len() as f32;
+        assert!(
+            (plain_centroid - Vec2::new(10.0, 0.0)).length() < 1e-3,
+            "default start line must stay on segment 0, got {plain_centroid:?}"
+        );
     }
 }

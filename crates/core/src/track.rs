@@ -17,6 +17,15 @@ pub struct Track {
     /// Surface of segment `i`, which connects `points[i]` to `points[i + 1]`.
     /// One entry per segment (`points.len() - 1`).
     pub surfaces: Vec<Surface>,
+    /// Authored decor props (scenery only; never affect handling).
+    pub props: Vec<TrackProp>,
+    /// Authored ground patches drawn beneath the Track (scenery only).
+    pub zones: Vec<TerrainZone>,
+    /// Visual theme of the circuit.
+    pub theme: Theme,
+    /// Index of the polyline segment holding the start/finish line and the
+    /// lap-progress origin (0 when the file omits the override).
+    pub start_segment: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +33,49 @@ pub enum Surface {
     Road,
     Grass,
     Gravel,
+}
+/// Kind of an authored decor prop placed near the Track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropKind {
+    Tree,
+    TireStack,
+    BrakeBoard,
+}
+
+/// Kind of an authored Terrain Zone ground patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneKind {
+    Sand,
+    Dirt,
+    DarkGrass,
+}
+
+/// Visual theme of the circuit. Only one theme exists for v1, kept as a
+/// typed enum so later themes extend the format without retyping the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    #[default]
+    Hillside,
+}
+
+/// One authored decor prop: scenery at a world position, never affecting
+/// handling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackProp {
+    pub kind: PropKind,
+    pub position: Vec2,
+    /// Facing in radians, converted from the authored `rotation_degrees`
+    /// (0 when the file omits it).
+    pub rotation: f32,
+}
+
+/// One authored Terrain Zone: a ground patch drawn beneath the Track,
+/// never affecting handling. The polygon auto-closes; the first vertex is
+/// not repeated at the end.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerrainZone {
+    pub kind: ZoneKind,
+    pub polygon: Vec<Vec2>,
 }
 
 /// Contact with a Track boundary wall.
@@ -79,6 +131,60 @@ impl Surface {
         }
     }
 }
+impl PropKind {
+    pub const KNOWN: [PropKind; 3] = [PropKind::Tree, PropKind::TireStack, PropKind::BrakeBoard];
+
+    fn from_name(name: &str) -> Option<PropKind> {
+        PropKind::KNOWN
+            .iter()
+            .copied()
+            .find(|kind| kind.name() == name)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            PropKind::Tree => "tree",
+            PropKind::TireStack => "tire_stack",
+            PropKind::BrakeBoard => "brake_board",
+        }
+    }
+}
+
+impl ZoneKind {
+    pub const KNOWN: [ZoneKind; 3] = [ZoneKind::Sand, ZoneKind::Dirt, ZoneKind::DarkGrass];
+
+    fn from_name(name: &str) -> Option<ZoneKind> {
+        ZoneKind::KNOWN
+            .iter()
+            .copied()
+            .find(|kind| kind.name() == name)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ZoneKind::Sand => "sand",
+            ZoneKind::Dirt => "dirt",
+            ZoneKind::DarkGrass => "dark_grass",
+        }
+    }
+}
+
+impl Theme {
+    pub const KNOWN: [Theme; 1] = [Theme::Hillside];
+
+    fn from_name(name: &str) -> Option<Theme> {
+        Theme::KNOWN
+            .iter()
+            .copied()
+            .find(|theme| theme.name() == name)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Theme::Hillside => "hillside",
+        }
+    }
+}
 
 /// A parsed Track or a descriptive reason the file was rejected.
 #[derive(Debug)]
@@ -101,6 +207,28 @@ pub enum TrackParseError {
         start: usize,
         end: usize,
         segment_count: usize,
+    },
+    /// A decor prop names a prop type that does not exist.
+    UnknownPropType {
+        found: String,
+        known: Vec<&'static str>,
+    },
+    /// A terrain zone names a zone kind that does not exist.
+    UnknownZoneKind {
+        found: String,
+        known: Vec<&'static str>,
+    },
+    /// A terrain zone has fewer than 3 distinct vertices; not a patch.
+    DegenerateZone { distinct: usize },
+    /// The start-line override names a segment beyond the polyline.
+    InvalidStartSegment {
+        segment: usize,
+        segment_count: usize,
+    },
+    /// The theme names a theme that does not exist.
+    UnknownTheme {
+        found: String,
+        known: Vec<&'static str>,
     },
 }
 
@@ -134,6 +262,33 @@ impl std::fmt::Display for TrackParseError {
                 "surface span covers segments {start}..={end} but the track has only \
                  {segment_count} segments"
             ),
+            TrackParseError::UnknownPropType { found, known } => write!(
+                f,
+                "unknown prop type '{found}'; known prop types: {}",
+                known.join(", ")
+            ),
+            TrackParseError::UnknownZoneKind { found, known } => write!(
+                f,
+                "unknown terrain zone kind '{found}'; known zone kinds: {}",
+                known.join(", ")
+            ),
+            TrackParseError::DegenerateZone { distinct } => write!(
+                f,
+                "terrain zone needs at least 3 distinct vertices, got {distinct}"
+            ),
+            TrackParseError::InvalidStartSegment {
+                segment,
+                segment_count,
+            } => write!(
+                f,
+                "start segment {segment} is out of range: the track has only \
+                 {segment_count} segments"
+            ),
+            TrackParseError::UnknownTheme { found, known } => write!(
+                f,
+                "unknown theme '{found}'; known themes: {}",
+                known.join(", ")
+            ),
         }
     }
 }
@@ -146,6 +301,14 @@ struct TrackSource {
     width: f32,
     points: Vec<[f32; 2]>,
     surfaces: Vec<SurfaceSpanSource>,
+    #[serde(default)]
+    props: Vec<PropSource>,
+    #[serde(default)]
+    terrain_zones: Vec<ZoneSource>,
+    #[serde(default)]
+    theme: Option<String>,
+    #[serde(default)]
+    start_line: Option<StartLineSource>,
 }
 
 /// One authored surface run: polyline segments `start..=end` (inclusive;
@@ -155,6 +318,30 @@ struct SurfaceSpanSource {
     start: usize,
     end: Option<usize>,
     surface: String,
+}
+
+/// One authored decor prop: `rotation_degrees` defaults to 0.
+#[derive(Deserialize)]
+struct PropSource {
+    #[serde(rename = "type")]
+    kind: String,
+    position: [f32; 2],
+    #[serde(default)]
+    rotation_degrees: Option<f32>,
+}
+
+/// One authored terrain zone: the polygon auto-closes, so the first vertex
+/// is not repeated at the end.
+#[derive(Deserialize)]
+struct ZoneSource {
+    kind: String,
+    polygon: Vec<[f32; 2]>,
+}
+
+/// Start/finish line override: which polyline segment holds the line.
+#[derive(Deserialize)]
+struct StartLineSource {
+    segment: usize,
 }
 
 /// Maximum distance between the first and last vertex for the loop to count
@@ -222,6 +409,78 @@ impl Track {
             }
         }
 
+        let theme = match &src.theme {
+            None => Theme::Hillside,
+            Some(name) => Theme::from_name(name).ok_or_else(|| {
+                let mut known: Vec<&'static str> = Theme::KNOWN.iter().map(|t| t.name()).collect();
+                known.sort_unstable();
+                TrackParseError::UnknownTheme {
+                    found: name.clone(),
+                    known,
+                }
+            })?,
+        };
+
+        let mut props = Vec::with_capacity(src.props.len());
+        for prop in &src.props {
+            let Some(kind) = PropKind::from_name(&prop.kind) else {
+                let mut known: Vec<&'static str> =
+                    PropKind::KNOWN.iter().map(|k| k.name()).collect();
+                known.sort_unstable();
+                return Err(TrackParseError::UnknownPropType {
+                    found: prop.kind.clone(),
+                    known,
+                });
+            };
+            props.push(TrackProp {
+                kind,
+                position: Vec2::new(prop.position[0], prop.position[1]),
+                rotation: prop.rotation_degrees.unwrap_or(0.0).to_radians(),
+            });
+        }
+
+        let mut zones = Vec::with_capacity(src.terrain_zones.len());
+        for zone in &src.terrain_zones {
+            let Some(kind) = ZoneKind::from_name(&zone.kind) else {
+                let mut known: Vec<&'static str> =
+                    ZoneKind::KNOWN.iter().map(|k| k.name()).collect();
+                known.sort_unstable();
+                return Err(TrackParseError::UnknownZoneKind {
+                    found: zone.kind.clone(),
+                    known,
+                });
+            };
+            let distinct = zone
+                .polygon
+                .iter()
+                .enumerate()
+                .filter(|(i, p)| {
+                    zone.polygon[..*i].iter().all(|q| {
+                        (p[0] - q[0]).abs() > CLOSURE_TOLERANCE
+                            || (p[1] - q[1]).abs() > CLOSURE_TOLERANCE
+                    })
+                })
+                .count();
+            if distinct < MIN_DISTINCT_POINTS {
+                return Err(TrackParseError::DegenerateZone { distinct });
+            }
+            zones.push(TerrainZone {
+                kind,
+                polygon: zone.polygon.iter().map(|p| Vec2::new(p[0], p[1])).collect(),
+            });
+        }
+
+        let start_segment = match &src.start_line {
+            None => 0,
+            Some(start_line) if start_line.segment < segment_count => start_line.segment,
+            Some(start_line) => {
+                return Err(TrackParseError::InvalidStartSegment {
+                    segment: start_line.segment,
+                    segment_count,
+                });
+            }
+        };
+
         let mut points: Vec<Vec2> = src.points.iter().map(|p| Vec2::new(p[0], p[1])).collect();
         // The tolerant closure check passed; canonicalize the closing vertex
         // so the documented last-equals-first invariant holds exactly.
@@ -233,6 +492,10 @@ impl Track {
             width: src.width,
             points,
             surfaces,
+            props,
+            zones,
+            theme,
+            start_segment,
         })
     }
 
@@ -286,10 +549,24 @@ impl Track {
         }
     }
 
+    /// Arc position of the start/finish line: the length along the centerline
+    /// from the first vertex to the overridden start segment's vertex (0
+    /// when the file omits the override).
+    pub fn start_arc(&self) -> f32 {
+        (0..self.start_segment)
+            .map(|i| self.points[i].distance(self.points[i + 1]))
+            .sum()
+    }
+
     /// Returns a world point `distance` units back along the polyline from
-    /// the start line (the first vertex), following the closed loop backwards.
+    /// the start line (the overridden start segment's vertex, or the first
+    /// vertex by default), following the closed loop backwards.
     pub fn spawn_pose(&self, distance: f32) -> Vec2 {
-        self.point_at_arc(self.total_length() - distance)
+        if self.start_segment == 0 {
+            self.point_at_arc(self.total_length() - distance)
+        } else {
+            self.point_at_arc(self.start_arc() - distance)
+        }
     }
 
     /// Half of the full road width: distance from the centerline polyline to
@@ -622,5 +899,146 @@ mod tests {
         // Off-center poses report signed lateral offset: left is positive.
         assert!(track.centerline_frame(Vec2::new(50.0, 3.0)).lateral > 2.9);
         assert!(track.centerline_frame(Vec2::new(50.0, -3.0)).lateral < -2.9);
+    }
+    /// A triangle circuit exercising every v2 field: props (one rotated, one
+    /// default-oriented), one terrain zone, an explicit theme, and a
+    /// start-line override.
+    fn v2_track_text() -> String {
+        r#"{
+            "name": "V2",
+            "width": 10.0,
+            "points": [[0,0],[10,0],[10,10],[0,0]],
+            "surfaces": [],
+            "props": [
+                {"type": "tree", "position": [5.0, 5.0], "rotation_degrees": 90.0},
+                {"type": "brake_board", "position": [8.0, 1.0]}
+            ],
+            "terrain_zones": [
+                {"kind": "dirt", "polygon": [[20,20],[30,20],[30,30],[20,30]]}
+            ],
+            "theme": "hillside",
+            "start_line": {"segment": 1}
+        }"#
+        .to_owned()
+    }
+
+    #[test]
+    fn v2_fields_parse_into_typed_props_zones_theme_and_start_segment() {
+        let track = Track::parse(&v2_track_text()).unwrap();
+        assert_eq!(track.props.len(), 2);
+        assert_eq!(track.props[0].kind, PropKind::Tree);
+        assert_eq!(track.props[0].position, Vec2::new(5.0, 5.0));
+        assert!(
+            (track.props[0].rotation - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+            "rotation {}",
+            track.props[0].rotation
+        );
+        assert_eq!(track.props[1].kind, PropKind::BrakeBoard);
+        assert_eq!(track.props[1].rotation, 0.0);
+        assert_eq!(track.zones.len(), 1);
+        assert_eq!(track.zones[0].kind, ZoneKind::Dirt);
+        assert_eq!(track.zones[0].polygon.len(), 4);
+        assert_eq!(track.theme, Theme::Hillside);
+        assert_eq!(track.start_segment, 1);
+    }
+
+    #[test]
+    fn v1_tracks_parse_with_v2_defaults() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        assert!(track.props.is_empty());
+        assert!(track.zones.is_empty());
+        assert_eq!(track.theme, Theme::Hillside);
+        assert_eq!(track.start_segment, 0);
+
+        let bare = Track::parse(&closed_triangle_text()).unwrap();
+        assert!(bare.props.is_empty());
+        assert!(bare.zones.is_empty());
+        assert_eq!(bare.theme, Theme::Hillside);
+        assert_eq!(bare.start_segment, 0);
+    }
+
+    #[test]
+    fn unknown_prop_type_is_rejected_with_descriptive_error() {
+        let text = v2_track_text().replace(
+            r#"{"type": "tree", "position": [5.0, 5.0], "rotation_degrees": 90.0}"#,
+            r#"{"type": "rock", "position": [5.0, 5.0]}"#,
+        );
+        let err = Track::parse(&text).unwrap_err();
+        assert!(
+            matches!(err, TrackParseError::UnknownPropType { .. }),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("unknown prop"), "message: {msg}");
+        assert!(msg.contains("'rock'"), "message: {msg}");
+        assert!(msg.contains("tree"), "message: {msg}");
+    }
+
+    #[test]
+    fn unknown_zone_kind_is_rejected_with_descriptive_error() {
+        let text = v2_track_text().replace(
+            r#"{"kind": "dirt", "polygon": [[20,20],[30,20],[30,30],[20,30]]}"#,
+            r#"{"kind": "lava", "polygon": [[20,20],[30,20],[30,30],[20,30]]}"#,
+        );
+        let err = Track::parse(&text).unwrap_err();
+        assert!(
+            matches!(err, TrackParseError::UnknownZoneKind { .. }),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("unknown terrain zone"), "message: {msg}");
+        assert!(msg.contains("'lava'"), "message: {msg}");
+        assert!(msg.contains("sand"), "message: {msg}");
+    }
+
+    #[test]
+    fn degenerate_zone_is_rejected_with_descriptive_error() {
+        let text = v2_track_text().replace(
+            "[[20,20],[30,20],[30,30],[20,30]]",
+            "[[20,20],[30,20],[20,20]]",
+        );
+        let err = Track::parse(&text).unwrap_err();
+        assert!(
+            matches!(err, TrackParseError::DegenerateZone { .. }),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("distinct vertices"), "message: {msg}");
+    }
+
+    #[test]
+    fn invalid_start_segment_is_rejected_with_descriptive_error() {
+        let text = v2_track_text().replace(
+            r#""start_line": {"segment": 1}"#,
+            r#""start_line": {"segment": 9}"#,
+        );
+        let err = Track::parse(&text).unwrap_err();
+        assert!(
+            matches!(err, TrackParseError::InvalidStartSegment { .. }),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("segment"), "message: {msg}");
+
+        // Boundary: the last valid segment index parses.
+        let ok = v2_track_text().replace(
+            r#""start_line": {"segment": 1}"#,
+            r#""start_line": {"segment": 2}"#,
+        );
+        assert_eq!(Track::parse(&ok).unwrap().start_segment, 2);
+    }
+
+    #[test]
+    fn unknown_theme_is_rejected_with_descriptive_error() {
+        let text = v2_track_text().replace(r#""theme": "hillside""#, r#""theme": "desert""#);
+        let err = Track::parse(&text).unwrap_err();
+        assert!(
+            matches!(err, TrackParseError::UnknownTheme { .. }),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("unknown theme"), "message: {msg}");
+        assert!(msg.contains("'desert'"), "message: {msg}");
+        assert!(msg.contains("hillside"), "message: {msg}");
     }
 }

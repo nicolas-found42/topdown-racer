@@ -5,7 +5,7 @@ use bevy::{prelude::*, render::camera::Viewport, window::PrimaryWindow};
 use glam::Vec2;
 use topdown_racer_core::simulation::{wrap_angle, CarSnapshot};
 
-use crate::{CarVisual, ShellSimulation, CAMERA_ZOOM, TARGET_ASPECT_RATIO};
+use crate::{CarSprite, ShellSimulation, CAMERA_ZOOM, TARGET_ASPECT_RATIO};
 
 /// Component tagging the follow camera.
 #[derive(Component)]
@@ -114,19 +114,19 @@ pub(crate) fn update_letterbox(
     });
 }
 
-/// Interpolates Car visual transform and follow Camera between fixed steps.
+/// Interpolates Car Sprite transform and follow Camera between fixed steps.
 pub(crate) fn interpolate_car_and_camera(
     shell: Res<ShellSimulation>,
     fixed_time: Res<Time<Fixed>>,
-    mut cars: Query<(&CarVisual, &mut Transform), Without<FollowCamera>>,
-    mut cameras: Query<&mut Transform, (With<FollowCamera>, Without<CarVisual>)>,
+    mut cars: Query<(&CarSprite, &mut Transform), Without<FollowCamera>>,
+    mut cameras: Query<&mut Transform, (With<FollowCamera>, Without<CarSprite>)>,
 ) {
     let alpha = fixed_time.overstep_fraction();
 
-    for (visual, mut car_tf) in cars.iter_mut() {
+    for (sprite, mut car_tf) in cars.iter_mut() {
         if let (Some(prev), Some(curr)) = (
-            shell.prev_snapshots.get(visual.car_index),
-            shell.curr_snapshots.get(visual.car_index),
+            shell.prev_snapshots.get(sprite.car_index),
+            shell.curr_snapshots.get(sprite.car_index),
         ) {
             let (interp_pose, interp_heading) = interpolate_snapshot_pose(prev, curr, alpha);
 
@@ -135,7 +135,7 @@ pub(crate) fn interpolate_car_and_camera(
             car_tf.rotation = Quat::from_rotation_z(interp_heading);
 
             // Follow camera tracks player Car (index 0)
-            if visual.car_index == 0 {
+            if sprite.car_index == 0 {
                 for mut cam_tf in cameras.iter_mut() {
                     cam_tf.translation.x = interp_pose.x;
                     cam_tf.translation.y = interp_pose.y;
