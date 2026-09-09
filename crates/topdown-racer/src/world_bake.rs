@@ -7,8 +7,8 @@
 //! clock — so identical input yields byte-identical pixels, assertable
 //! without a window. Layers paint in painter's order (grass field, terrain
 //! zones, road, centerline dashes, kerbs, edge lines, start line,
-//! guardrails), mirroring the quad z-order of the flat-quad renderer the
-//! baked canvas will replace; wiring into the game is a later ticket.
+//! guardrails). The shell uploads this canvas once and renders it below
+//! scenery, Cars, and driving FX.
 //!
 //! Art rules (all colors from the project palette, see [`crate::palette`]):
 //! - grass field: mowing bands 8 units tall along world Y, alternating
@@ -37,8 +37,9 @@ use crate::track_geometry::{Quad, TrackRenderGeometry};
 /// Native texel density of the baked world canvas and the sprite pipeline.
 pub const TEXELS_PER_UNIT: f32 = 8.0;
 
-/// Grass (and world) margin around the geometry's bounding box, in units.
-pub const CANVAS_MARGIN_UNITS: f32 = 16.0;
+/// Grass margin around geometry bounds: covers the fixed camera's
+/// 40-unit half-width, with slack for camera snapping and wall correction.
+pub const CANVAS_MARGIN_UNITS: f32 = 48.0;
 
 /// Height of one mowing band on the grass field, in world units.
 const MOWING_BAND_UNITS: f32 = 8.0;
@@ -213,7 +214,7 @@ impl WorldCanvas {
 
 /// Bakes the static world into one pixel canvas: grass field, terrain
 /// zones, road, dashes, kerbs, edge lines, start line, guardrails — in
-/// that painter's order, matching the flat-quad z-order.
+/// that painter's order.
 pub fn bake_world(geometry: &TrackRenderGeometry, theme: Theme) -> WorldCanvas {
     let mut canvas = WorldCanvas::for_geometry(geometry);
     match theme {
@@ -361,7 +362,7 @@ mod tests {
     use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
 
     /// 2x2-unit road quad at the origin: the minimal geometry the canvas
-    /// math is hand-checkable against (origin (-16,-16), 272x272 texels).
+    /// math is hand-checkable against (origin (-48,-48), 784x784 texels).
     fn flat_road_geometry() -> TrackRenderGeometry {
         TrackRenderGeometry {
             road: vec![RoadQuad {
@@ -382,10 +383,10 @@ mod tests {
     #[test]
     fn canvas_covers_geometry_with_margin_at_native_density() {
         let canvas = bake_world(&flat_road_geometry(), Theme::Hillside);
-        // Bounding box [-16, 18]^2 (2x2 quad + 16-unit margin), 8 texels
+        // Bounding box [-48, 50]^2 (2x2 quad + 48-unit margin), 8 texels
         // per unit.
-        assert_eq!((canvas.width, canvas.height), (272, 272));
-        assert_eq!(canvas.world_origin(), Vec2::new(-16.0, -16.0));
+        assert_eq!((canvas.width, canvas.height), (784, 784));
+        assert_eq!(canvas.world_origin(), Vec2::new(-48.0, -48.0));
         // Texel <-> world round-trips inside half a texel.
         let world = Vec2::new(1.0, 1.0);
         let (px, py) = canvas.texel_of(world).unwrap();
@@ -402,7 +403,7 @@ mod tests {
     #[test]
     fn grass_field_bands_and_dither() {
         let canvas = bake_world(&flat_road_geometry(), Theme::Hillside);
-        // Origin (-16,-16) puts texel centers on -16 + odd/16, so these
+        // Origin (-48,-48) puts texel centers on -48 + odd/16, so these
         // hand-picked samples miss the speckle lattice (Bayer >= 2) and
         // pin the raw band colors: bands 8 units tall along world Y.
         assert_eq!(

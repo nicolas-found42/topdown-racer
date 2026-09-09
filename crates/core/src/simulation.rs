@@ -69,6 +69,12 @@ pub struct CarSnapshot {
     /// Steering demand applied on this tick, -1..1. Positive is left
     /// (counter-clockwise); drives the front-wheel visual angle.
     pub steer: f32,
+    /// Forward acceleration demand applied on this tick, 0..1.
+    pub throttle: f32,
+    /// Braking demand applied on this tick, 0..1.
+    pub brake: f32,
+    /// Handbrake demand applied on this tick.
+    pub handbrake: bool,
     /// Surface the Car is currently driving on.
     pub surface: Surface,
     /// Whether the Car contacted a boundary wall during this tick.
@@ -104,6 +110,9 @@ struct CarState {
     heading: f32,
     velocity: Vec2,
     steer: f32,
+    throttle: f32,
+    brake: f32,
+    handbrake: bool,
     reverse: bool,
     standstill_ticks: u32,
     completed_laps: u32,
@@ -151,6 +160,9 @@ impl Sim {
                     heading,
                     velocity: Vec2::ZERO,
                     steer: 0.0,
+                    throttle: 0.0,
+                    brake: 0.0,
+                    handbrake: false,
                     reverse: false,
                     standstill_ticks: 0,
                     completed_laps: 0,
@@ -266,6 +278,9 @@ impl Sim {
             };
 
             car.steer = effective_input.steer;
+            car.throttle = effective_input.throttle;
+            car.brake = effective_input.brake;
+            car.handbrake = effective_input.handbrake;
             let (surface, wall_contact, drifting) = step_car(car, effective_input, &self.track);
             step_results.push((surface, wall_contact, drifting));
 
@@ -335,6 +350,9 @@ impl Sim {
             velocity: car.velocity,
             forward_speed: car.velocity.dot(forward(car.heading)),
             steer: car.steer,
+            throttle: car.throttle,
+            brake: car.brake,
+            handbrake: car.handbrake,
             surface,
             wall_contact,
             drifting,

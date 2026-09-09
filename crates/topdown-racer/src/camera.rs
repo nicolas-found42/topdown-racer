@@ -5,7 +5,7 @@ use bevy::{prelude::*, render::camera::Viewport, window::PrimaryWindow};
 use glam::Vec2;
 use topdown_racer_core::simulation::{wrap_angle, CarSnapshot};
 
-use crate::{CarSprite, ShellSimulation, CAMERA_ZOOM, TARGET_ASPECT_RATIO};
+use crate::{CarSprite, ShellSimulation, CAMERA_VIEW_SIZE, TARGET_ASPECT_RATIO, TEXELS_PER_UNIT};
 
 /// Component tagging the follow camera.
 #[derive(Component)]
@@ -87,7 +87,10 @@ pub(crate) fn interpolate_snapshot_pose(
 /// Spawns the 2D camera with the fixed zoom and follow-camera marker.
 pub(crate) fn setup_camera(mut commands: Commands) {
     let mut camera = Camera2dBundle::default();
-    camera.projection.scale = CAMERA_ZOOM;
+    camera.projection.scaling_mode = bevy::render::camera::ScalingMode::Fixed {
+        width: CAMERA_VIEW_SIZE.x,
+        height: CAMERA_VIEW_SIZE.y,
+    };
     commands.spawn((camera, FollowCamera));
 }
 
@@ -105,7 +108,24 @@ pub(crate) fn update_letterbox(
 
     let width = window.physical_width();
     let height = window.physical_height();
-    let rect = compute_letterbox_viewport(width, height, TARGET_ASPECT_RATIO);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let native = (CAMERA_VIEW_SIZE * TEXELS_PER_UNIT).as_uvec2();
+    let scale = (width / native.x).min(height / native.y);
+    // Whole screen pixels per texel, centered inside the window. Below
+    // native resolution, retain the full fixed view with nearest downsampling.
+    let rect = if scale > 0 {
+        let size = native * scale;
+        ViewportRect {
+            x: (width - size.x) / 2,
+            y: (height - size.y) / 2,
+            width: size.x,
+            height: size.y,
+        }
+    } else {
+        compute_letterbox_viewport(width, height, TARGET_ASPECT_RATIO)
+    };
 
     camera.viewport = Some(Viewport {
         physical_position: UVec2::new(rect.x, rect.y),
@@ -137,8 +157,9 @@ pub(crate) fn interpolate_car_and_camera(
             // Follow camera tracks player Car (index 0)
             if sprite.car_index == 0 {
                 for mut cam_tf in cameras.iter_mut() {
-                    cam_tf.translation.x = interp_pose.x;
-                    cam_tf.translation.y = interp_pose.y;
+                    let camera_pose = (interp_pose * TEXELS_PER_UNIT).round() / TEXELS_PER_UNIT;
+                    cam_tf.translation.x = camera_pose.x;
+                    cam_tf.translation.y = camera_pose.y;
                     cam_tf.rotation = Quat::IDENTITY;
                 }
             }
