@@ -35,7 +35,9 @@ impl Plugin for RaceLifecyclePlugin {
             .add_systems(
                 Update,
                 (
-                    (crate::menu::select_pace_system, menu_action_system).chain().run_if(in_state(AppState::Menu)),
+                    (crate::menu::select_pace_system, menu_action_system)
+                        .chain()
+                        .run_if(in_state(AppState::Menu)),
                     esc_to_menu_system.run_if(in_state(AppState::Race)),
                     detect_race_finish.run_if(in_state(AppState::Race)),
                     results_action_system.run_if(in_state(AppState::Results)),
@@ -52,7 +54,11 @@ pub fn auto_start_race(mut next_state: ResMut<NextState<AppState>>) {
 }
 
 /// Rebuilds a fresh countdown race whenever entering the Race state.
-pub fn reset_race_on_enter(mut shell: ResMut<ShellSimulation>, mut gate: ResMut<crate::ControlGate>, mut input: ResMut<crate::PlayerInput>) {
+pub fn reset_race_on_enter(
+    mut shell: ResMut<ShellSimulation>,
+    mut gate: ResMut<crate::ControlGate>,
+    mut input: ResMut<crate::PlayerInput>,
+) {
     shell.reset_to_fresh_race();
     gate.0 = true;
     input.0 = Default::default();
@@ -171,12 +177,32 @@ mod tests {
         settle(&mut app);
         press(&mut app, KeyCode::Enter);
         settle(&mut app);
-        assert_eq!(app.world().resource::<ShellSimulation>().sim.opponent_pace(), OpponentPace::Touring);
+        assert_eq!(
+            app.world()
+                .resource::<ShellSimulation>()
+                .sim
+                .opponent_pace(),
+            OpponentPace::Touring
+        );
         press(&mut app, KeyCode::Digit3);
         settle(&mut app);
-        assert_eq!(app.world().resource::<ShellSimulation>().sim.opponent_pace(), OpponentPace::Touring);
-        app.world_mut().resource_mut::<ShellSimulation>().reset_to_fresh_race();
-        assert_eq!(app.world().resource::<ShellSimulation>().sim.opponent_pace(), OpponentPace::Touring);
+        assert_eq!(
+            app.world()
+                .resource::<ShellSimulation>()
+                .sim
+                .opponent_pace(),
+            OpponentPace::Touring
+        );
+        app.world_mut()
+            .resource_mut::<ShellSimulation>()
+            .reset_to_fresh_race();
+        assert_eq!(
+            app.world()
+                .resource::<ShellSimulation>()
+                .sim
+                .opponent_pace(),
+            OpponentPace::Touring
+        );
     }
 
     #[test]
@@ -292,6 +318,50 @@ mod tests {
             RacePhase::Countdown {
                 ticks_remaining: DEFAULT_COUNTDOWN_TICKS
             }
+        );
+    }
+
+    #[test]
+    fn menu_round_trip_keeps_visible_mode_but_resets_gate_and_input() {
+        use topdown_racer_core::simulation::{CarInput, DrivingMode};
+        let mut app = lifecycle_app(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        press(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(state(&mut app), AppState::Race);
+        // Visible selection: Autopilot, with a stale held throttle latched
+        // in the input resource.
+        app.world_mut()
+            .resource_mut::<ShellSimulation>()
+            .sim
+            .request_player_mode(DrivingMode::Autopilot);
+        app.world_mut().resource_mut::<crate::PlayerInput>().0 = CarInput {
+            throttle: 1.0,
+            ..Default::default()
+        };
+        // Round-trip through the menu and back into a race.
+        press(&mut app, KeyCode::Escape);
+        settle(&mut app);
+        assert_eq!(state(&mut app), AppState::Menu);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        press(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(state(&mut app), AppState::Race);
+        let world = app.world();
+        assert_eq!(
+            world.resource::<ShellSimulation>().sim.player_mode(),
+            DrivingMode::Autopilot,
+            "menu round-trip keeps the visible selection"
+        );
+        assert_eq!(
+            world.resource::<crate::PlayerInput>().0.throttle,
+            0.0,
+            "no latched throttle survives the menu"
+        );
+        assert!(
+            world.resource::<crate::ControlGate>().0,
+            "re-entry gates input until keys release"
         );
     }
 }
