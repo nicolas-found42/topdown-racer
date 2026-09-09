@@ -81,6 +81,17 @@ A native desktop (Bevy) top-down racer: one hand-authored closed Track, the play
 - Ghost/Run input-replay recording.
 - Full audio pass (engine/skid cues only as the stretch story).
 
+## Amendment: Track model width ramp (2026-09-09, spec #32 / ticket #39)
+
+The Track model above ("center polyline, width, surface segments") gained a
+per-vertex **width ramp**: road width interpolates linearly between polyline
+vertices, expanding into straights and contracting into corners. The global
+`width` field is gone — the parser always resolves a per-vertex `widths`
+array (a single authored `width` still loads, as a uniform ramp). Walls,
+surface classification, checkpoints, AI planning, and render geometry all
+consume the local interpolated width. See the pixel-art presentation spec
+(issue #32) and ADR-0003 for the presentation-side decisions.
+
 ## Further Notes
 
 - Research that informed the stack and steal-lists: `docs/research/rust-stack-awesome.md`, `docs/research/rust-stack-github.md`, `docs/research/rust-stack-docs.md` (closest prior art: a Bevy + rapier2d top-down racer's drift model, and an engine-free FixedUpdate drift formulation).

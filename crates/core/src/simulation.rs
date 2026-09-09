@@ -4,6 +4,7 @@
 
 use glam::Vec2;
 
+use crate::ai::{AiDriver, AiView};
 use crate::track::{Surface, Track};
 
 /// Fixed simulation rate in steps per second.
@@ -65,6 +66,9 @@ pub struct CarSnapshot {
     pub velocity: Vec2,
     /// Signed speed along the Car's heading; negative while reversing.
     pub forward_speed: f32,
+    /// Steering demand applied on this tick, -1..1. Positive is left
+    /// (counter-clockwise); drives the front-wheel visual angle.
+    pub steer: f32,
     /// Surface the Car is currently driving on.
     pub surface: Surface,
     /// Whether the Car contacted a boundary wall during this tick.
@@ -90,12 +94,16 @@ pub struct Sim {
     track: Track,
     cars: Vec<CarState>,
     phase: RacePhase,
+    /// Fixed ticks elapsed since the race phase began (green). The Race clock
+    /// lives in the simulation so every consumer (HUD, overlays) reads one clock.
+    racing_ticks: u32,
 }
 
 struct CarState {
     pose: Vec2,
     heading: f32,
     velocity: Vec2,
+    steer: f32,
     reverse: bool,
     standstill_ticks: u32,
     completed_laps: u32,
@@ -128,6 +136,8 @@ impl Sim {
 
     /// Builds a sim with an explicit initial `RacePhase`.
     pub fn new_with_phase(track: Track, car_count: usize, phase: RacePhase) -> Sim {
+        let total_cps = track.points.len() - 1;
+        let start = track.start_segment;
         let cars = (0..car_count)
             .map(|i| {
                 let pose = track.spawn_pose(i as f32 * CAR_SPACING);
@@ -140,25 +150,38 @@ impl Sim {
                     pose,
                     heading,
                     velocity: Vec2::ZERO,
+                    steer: 0.0,
                     reverse: false,
                     standstill_ticks: 0,
                     completed_laps: 0,
                     current_lap_ticks: 0,
-                    next_checkpoint: 1,
-                    last_cleared_checkpoint: 0,
+                    next_checkpoint: (start + 1) % total_cps,
+                    last_cleared_checkpoint: start,
                     lap_times: [None; TOTAL_LAPS as usize],
                     best_lap_time: None,
                     ai: None,
                 }
             })
             .collect();
-        Sim { track, cars, phase }
+        Sim {
+            track,
+            cars,
+            phase,
+            racing_ticks: 0,
+        }
     }
 
     /// Enables AI driver controllers for trailing cars (indices 1..car_count).
     pub fn enable_ai_opponents(&mut self) {
         for (i, car) in self.cars.iter_mut().enumerate().skip(1) {
             car.ai = Some(AiDriver::new(i));
+        }
+    }
+
+    /// Sets (or clears) the AI driver for one car. Out-of-range indices are ignored.
+    pub fn set_ai(&mut self, car_index: usize, ai: Option<AiDriver>) {
+        if let Some(car) = self.cars.get_mut(car_index) {
+            car.ai = ai;
         }
     }
 
@@ -170,6 +193,16 @@ impl Sim {
     /// Current phase of the Race.
     pub fn phase(&self) -> RacePhase {
         self.phase
+    }
+
+    /// Fixed ticks elapsed since the race phase began (green); 0 during countdown.
+    pub fn racing_ticks(&self) -> u32 {
+        self.racing_ticks
+    }
+
+    /// Whether car `car_index` currently has an AI driver attached.
+    pub fn ai_enabled(&self, car_index: usize) -> bool {
+        self.cars.get(car_index).is_some_and(|car| car.ai.is_some())
     }
 
     /// Puts the simulation into a countdown with the specified number of ticks.
@@ -200,65 +233,49 @@ impl Sim {
                     false
                 }
             }
-            RacePhase::Racing | RacePhase::Finished => false,
+            RacePhase::Racing => {
+                self.racing_ticks += 1;
+                false
+            }
+            RacePhase::Finished => false,
         };
         let total_cps = self.track.points.len() - 1;
-        let cp_radius = self.track.wall_distance() * 1.5;
 
-        // Step all cars
+        // Step all cars. AI drivers perceive the field (every Car's pose and
+        // velocity) plus the Track, and answer with player-identical inputs.
+        let field: Vec<(Vec2, Vec2)> = self.cars.iter().map(|c| (c.pose, c.velocity)).collect();
         let mut step_results = Vec::with_capacity(self.cars.len());
         for (i, car) in self.cars.iter_mut().enumerate() {
             let effective_input = if controls_locked {
                 CarInput::default()
             } else if let Some(ai) = &mut car.ai {
-                if inputs.len() > i {
+                if inputs.len() > i && inputs[i] != CarInput::default() {
                     inputs[i]
                 } else {
-                    let fwd = forward(car.heading);
-                    let fwd_speed = car.velocity.dot(fwd);
-                    ai.compute_input(car.pose, car.heading, fwd_speed, &self.track)
+                    ai.compute_input(AiView {
+                        car_index: i,
+                        pose: car.pose,
+                        heading: car.heading,
+                        velocity: car.velocity,
+                        track: &self.track,
+                        field: &field,
+                    })
                 }
             } else {
                 inputs.get(i).copied().unwrap_or_default()
             };
 
+            car.steer = effective_input.steer;
             let (surface, wall_contact, drifting) = step_car(car, effective_input, &self.track);
             step_results.push((surface, wall_contact, drifting));
 
             // In Racing phase, accumulate lap time and check ordered progress
             if self.phase == RacePhase::Racing {
-                car.current_lap_ticks += 1;
-
-                let target_cp = car.next_checkpoint;
-                let cp_pos = self.track.points[target_cp];
-                let entry_dir = if target_cp == 0 {
-                    cp_pos - self.track.points[total_cps - 1]
-                } else {
-                    cp_pos - self.track.points[target_cp - 1]
-                };
-                if (car.pose - cp_pos).length() < cp_radius && car.velocity.dot(entry_dir) > 0.0 {
-                    car.last_cleared_checkpoint = target_cp;
-                    if target_cp == 0 {
-                        // Crossed start/finish having visited all checkpoints in order
-                        if car.completed_laps < TOTAL_LAPS {
-                            let lap_time = car.current_lap_ticks as f32 * FIXED_DT;
-                            car.lap_times[car.completed_laps as usize] = Some(lap_time);
-                            car.best_lap_time = Some(match car.best_lap_time {
-                                Some(best) => best.min(lap_time),
-                                None => lap_time,
-                            });
-                            car.completed_laps += 1;
-                            car.current_lap_ticks = 0;
-                        }
-                        car.next_checkpoint = 1;
-                    } else {
-                        car.next_checkpoint = (target_cp + 1) % total_cps;
-                    }
-                }
+                advance_lap_progress(car, &self.track, total_cps);
             }
         }
 
-        // Car-to-Car collisions: pairwise sphere collision response
+        // Car-to-Car collisions: pairwise oriented-box collision response
         resolve_car_collisions(&mut self.cars);
 
         // If any car completed all laps, the race transitions to Finished
@@ -269,48 +286,65 @@ impl Sim {
         }
 
         // Calculate live positions: sorted by progress score
-        let mut car_scores: Vec<(usize, f32)> = self
-            .cars
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let next_cp = self.track.points[c.next_checkpoint];
-                let dist_to_next = (c.pose - next_cp).length();
-                let score = c.completed_laps as f32 * 10000.0
-                    + c.last_cleared_checkpoint as f32 * 100.0
-                    - (dist_to_next / 1000.0);
-                (i, score)
-            })
-            .collect();
-        car_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let mut positions = vec![1; self.cars.len()];
-        for (pos_idx, (car_idx, _)) in car_scores.iter().enumerate() {
-            positions[*car_idx] = pos_idx + 1;
-        }
+        let positions = compute_positions(&self.cars, &self.track);
 
         // Build final snapshots
         self.cars
             .iter()
-            .enumerate()
-            .map(|(i, car)| {
-                let (surface, wall_contact, drifting) = step_results[i];
-                CarSnapshot {
-                    pose: car.pose,
-                    heading: car.heading,
-                    velocity: car.velocity,
-                    forward_speed: car.velocity.dot(forward(car.heading)),
-                    surface,
-                    wall_contact,
-                    drifting,
-                    phase: self.phase,
-                    completed_laps: car.completed_laps,
-                    lap_times: car.lap_times,
-                    current_lap_time: car.current_lap_ticks as f32 * FIXED_DT,
-                    best_lap_time: car.best_lap_time,
-                    position: positions[i],
-                }
+            .zip(positions.iter())
+            .zip(step_results.iter())
+            .map(|((car, &position), &(surface, wall_contact, drifting))| {
+                Self::make_snapshot(car, surface, wall_contact, drifting, position, self.phase)
             })
             .collect()
+    }
+
+    /// Projects each Car's current state into a snapshot without stepping.
+    /// Surface and wall contact are sampled at the current pose; `drifting`
+    /// is false because drift state is only meaningful after a step.
+    pub fn snapshots(&self) -> Vec<CarSnapshot> {
+        let positions = compute_positions(&self.cars, &self.track);
+        self.cars
+            .iter()
+            .zip(positions.iter())
+            .map(|(car, &position)| {
+                Self::make_snapshot(
+                    car,
+                    self.track.sample_surface(car.pose),
+                    self.track.wall_contact(car.pose).is_some(),
+                    false,
+                    position,
+                    self.phase,
+                )
+            })
+            .collect()
+    }
+
+    /// Shared CarState → CarSnapshot projection for tick and no-tick paths.
+    fn make_snapshot(
+        car: &CarState,
+        surface: Surface,
+        wall_contact: bool,
+        drifting: bool,
+        position: usize,
+        phase: RacePhase,
+    ) -> CarSnapshot {
+        CarSnapshot {
+            pose: car.pose,
+            heading: car.heading,
+            velocity: car.velocity,
+            forward_speed: car.velocity.dot(forward(car.heading)),
+            steer: car.steer,
+            surface,
+            wall_contact,
+            drifting,
+            phase,
+            completed_laps: car.completed_laps,
+            lap_times: car.lap_times,
+            current_lap_time: car.current_lap_ticks as f32 * FIXED_DT,
+            best_lap_time: car.best_lap_time,
+            position,
+        }
     }
 }
 
@@ -341,6 +375,73 @@ impl SurfacePhysics {
             },
         }
     }
+}
+
+/// Advances one Car's lap/checkpoint progress for a single tick: accumulates
+/// the current lap time and, on ordered checkpoint entry, records lap times,
+/// best lap, completed laps, and the next checkpoint to clear.
+fn advance_lap_progress(car: &mut CarState, track: &Track, total_cps: usize) {
+    car.current_lap_ticks += 1;
+
+    let start = track.start_segment;
+    let target_cp = car.next_checkpoint;
+    // Checkpoint clearing radius follows the checkpoint vertex's local
+    // width (uniform-width tracks: wall_distance * 1.5, as before).
+    let cp_radius = track.widths[target_cp] * CHECKPOINT_CLEAR_WIDTH_FACTOR;
+    let cp_pos = track.points[target_cp];
+    let entry_dir = if target_cp == 0 {
+        cp_pos - track.points[total_cps - 1]
+    } else {
+        cp_pos - track.points[target_cp - 1]
+    };
+    if (car.pose - cp_pos).length() < cp_radius && car.velocity.dot(entry_dir) > 0.0 {
+        car.last_cleared_checkpoint = target_cp;
+        if target_cp == start {
+            // Crossed start/finish having visited all checkpoints in order
+            if car.completed_laps < TOTAL_LAPS {
+                let lap_time = car.current_lap_ticks as f32 * FIXED_DT;
+                car.lap_times[car.completed_laps as usize] = Some(lap_time);
+                car.best_lap_time = Some(match car.best_lap_time {
+                    Some(best) => best.min(lap_time),
+                    None => lap_time,
+                });
+                car.completed_laps += 1;
+                car.current_lap_ticks = 0;
+            }
+            car.next_checkpoint = (start + 1) % total_cps;
+        } else {
+            car.next_checkpoint = (target_cp + 1) % total_cps;
+        }
+    }
+}
+/// Computes live race positions from progress scores, returning a 1-indexed
+/// position per car (index-aligned with `cars`). Higher completed laps and
+/// cleared checkpoints rank ahead; closer distance to the next checkpoint
+/// breaks ties.
+fn compute_positions(cars: &[CarState], track: &Track) -> Vec<usize> {
+    let total_cps = track.points.len() - 1;
+    let start = track.start_segment;
+    let mut car_scores: Vec<(usize, f32)> = cars
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let next_cp = track.points[c.next_checkpoint];
+            let dist_to_next = (c.pose - next_cp).length();
+            // Checkpoints cleared since the start/finish line, so the order
+            // stays monotonic when the line is overridden (identical to the
+            // raw index when the line is at segment 0).
+            let progress = (c.last_cleared_checkpoint + total_cps - start) % total_cps;
+            let score = c.completed_laps as f32 * 10000.0 + progress as f32 * 100.0
+                - (dist_to_next / 1000.0);
+            (i, score)
+        })
+        .collect();
+    car_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut positions = vec![1; cars.len()];
+    for (pos_idx, (car_idx, _)) in car_scores.iter().enumerate() {
+        positions[*car_idx] = pos_idx + 1;
+    }
+    positions
 }
 
 fn step_car(car: &mut CarState, input: CarInput, track: &Track) -> (Surface, bool, bool) {
@@ -496,8 +597,12 @@ const ENGINE_ACCEL: f32 = 24.0;
 const DRAG_COEFF: f32 = 0.0075;
 /// Linear rolling resistance, per unit/s.
 const ROLLING_RESIST: f32 = 0.6;
+/// Terminal speed reached at full throttle when engine accel balances quadratic
+/// drag and rolling resistance (derived from ENGINE_ACCEL, DRAG_COEFF, ROLLING_RESIST;
+/// pinned by the terminal_speed_matches_top_speed_const test).
+pub const TOP_SPEED: f32 = 29.3;
 /// Braking deceleration at full brake, in world units per second squared.
-const BRAKE_ACCEL: f32 = 36.0;
+pub const BRAKE_ACCEL: f32 = 36.0;
 /// Reverse acceleration at full demand, in world units per second squared.
 const REVERSE_ACCEL: f32 = 12.0;
 /// Top speed while reversing, in world units per second.
@@ -507,9 +612,9 @@ const STANDSTILL_THRESHOLD: f32 = 0.05;
 /// Number of fixed ticks holding brake at a standstill to engage reverse (0.25 s at 64 Hz).
 const STANDSTILL_REVERSE_TICKS: u32 = 16;
 /// Maximum angular velocity when steering, in radians per second (~180 deg/s).
-const MAX_ANGULAR_VEL: f32 = 3.2;
+pub const MAX_ANGULAR_VEL: f32 = 3.2;
 /// Steering sensitivity factor translating forward speed and steer input into angular velocity.
-const STEER_SENSITIVITY: f32 = 0.15;
+pub const STEER_SENSITIVITY: f32 = 0.15;
 /// Coefficient of restitution for boundary wall collisions (normal velocity bounce).
 const WALL_RESTITUTION: f32 = 0.4;
 /// Tangential friction coefficient during boundary wall collisions.
@@ -521,41 +626,45 @@ const ACCEL_WEIGHT_TRANSFER: f32 = 0.08;
 /// Rear axle grip reduction factor under braking.
 const BRAKE_REAR_UNLOAD: f32 = 0.25;
 /// Lateral grip restitution rate damping sideways velocity (1/s).
-const LATERAL_GRIP_RATE: f32 = 24.0;
+pub const LATERAL_GRIP_RATE: f32 = 24.0;
 /// Lateral grip multiplier when handbrake is engaged (cutting grip).
 const HANDBRAKE_LATERAL_GRIP_FACTOR: f32 = 0.12;
 /// Deceleration applied along heading when handbrake is engaged.
 const HANDBRAKE_DECEL: f32 = 12.0;
+/// Factor over the checkpoint vertex's local road width that yields the
+/// checkpoint clearing radius (uniform-width tracks: wall_distance * 1.5,
+/// as before).
+const CHECKPOINT_CLEAR_WIDTH_FACTOR: f32 = 1.5;
+
 /// Minimum forward speed to be eligible for the Drift state.
 const DRIFT_SPEED_MIN: f32 = 3.0;
 /// Minimum lateral slip speed to enter the Drift state.
-const DRIFT_LATERAL_SLIP_MIN: f32 = 1.2;
+pub const DRIFT_LATERAL_SLIP_MIN: f32 = 1.2;
 /// Minimum lateral slip speed under handbrake to enter the Drift state.
 const HANDBRAKE_DRIFT_SLIP_MIN: f32 = 0.4;
-/// Bounding circle radius for car-to-car collision resolution.
-pub const CAR_COLLISION_RADIUS: f32 = 1.6;
+/// Half length of the Car's collision box in world units, covering the nose
+/// (x = 2.1) through the rear wing (x = -2.2).
+pub const CAR_HALF_LENGTH: f32 = 2.2;
+/// Half width of the Car's collision box in world units, covering the outer
+/// tire edges (|y| = 1.29).
+pub const CAR_HALF_WIDTH: f32 = 1.3;
 /// Coefficient of restitution for car-to-car collisions.
 pub const CAR_COLLISION_RESTITUTION: f32 = 0.5;
 
-const AI_WAYPOINT_CAPTURE_RADIUS: f32 = 14.0;
-const AI_BRAKE_LOOKAHEAD_DISTANCE: f32 = 42.0;
-const AI_STRAIGHT_TARGET_SPEED: f32 = 20.0;
-const AI_CORNER_TARGET_SPEED: f32 = 9.0;
-const AI_CORNER_ANGLE_THRESHOLD: f32 = 0.4;
-const AI_STEER_GAIN: f32 = 2.5;
-const AI_LATERAL_OFFSET_SPACING: f32 = 1.2;
-
-/// Resolves pairwise circle collisions between all cars with separation and elastic impulse.
+/// Resolves pairwise oriented-box collisions between all cars with separation
+/// and elastic impulse (SAT on the two heading frames).
+///
+/// The old bounding circle (radius 1.6, diameter 3.2) was shorter than the
+/// visual Car (~4.3 nose to tail), so bumper-to-bumper cars overlapped by a
+/// full unit before the resolver engaged. The box matches the rendered
+/// chassis, nose, wing, and tire extents.
 fn resolve_car_collisions(cars: &mut [CarState]) {
     let num_cars = cars.len();
     for i in 0..num_cars {
         for j in (i + 1)..num_cars {
-            let delta = cars[j].pose - cars[i].pose;
-            let dist = delta.length();
-            let min_dist = CAR_COLLISION_RADIUS * 2.0;
-            if dist < min_dist && dist > 0.0001 {
-                let normal = delta / dist;
-                let penetration = min_dist - dist;
+            if let Some((normal, penetration)) =
+                obb_penetration(cars[i].pose, cars[i].heading, cars[j].pose, cars[j].heading)
+            {
                 cars[i].pose -= normal * (penetration * 0.5);
                 cars[j].pose += normal * (penetration * 0.5);
 
@@ -571,6 +680,41 @@ fn resolve_car_collisions(cars: &mut [CarState]) {
     }
 }
 
+/// SAT overlap of two Car boxes. Returns the minimum-penetration world-space
+/// normal (pointing from `pose_a` toward `pose_b`) and penetration depth, or
+/// `None` when separated on any of the four box axes.
+fn obb_penetration(
+    pose_a: Vec2,
+    heading_a: f32,
+    pose_b: Vec2,
+    heading_b: f32,
+) -> Option<(Vec2, f32)> {
+    let fwd_a = forward(heading_a);
+    let left_a = Vec2::new(-fwd_a.y, fwd_a.x);
+    let fwd_b = forward(heading_b);
+    let left_b = Vec2::new(-fwd_b.y, fwd_b.x);
+    let delta = pose_b - pose_a;
+    let axes = [fwd_a, left_a, fwd_b, left_b];
+    let mut best: Option<(Vec2, f32)> = None;
+    for axis in axes {
+        let extent_a =
+            CAR_HALF_LENGTH * fwd_a.dot(axis).abs() + CAR_HALF_WIDTH * left_a.dot(axis).abs();
+        let extent_b =
+            CAR_HALF_LENGTH * fwd_b.dot(axis).abs() + CAR_HALF_WIDTH * left_b.dot(axis).abs();
+        let dist = delta.dot(axis).abs();
+        let overlap = extent_a + extent_b - dist;
+        if overlap <= 0.0 {
+            return None;
+        }
+        let sign = if delta.dot(axis) < 0.0 { -1.0 } else { 1.0 };
+        let normal = axis * sign;
+        if best.is_none_or(|(_, depth)| overlap < depth) {
+            best = Some((normal, overlap));
+        }
+    }
+    best
+}
+
 /// Wraps an angle delta to the range $[-\pi, \pi]$ taking the shortest rotational path.
 pub fn wrap_angle(mut delta: f32) -> f32 {
     while delta > std::f32::consts::PI {
@@ -580,87 +724,6 @@ pub fn wrap_angle(mut delta: f32) -> f32 {
         delta += 2.0 * std::f32::consts::PI;
     }
     delta
-}
-
-/// Fixed AI skill driver following the Track racing line with corner slowdown.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AiDriver {
-    pub lateral_offset: f32,
-    pub current_waypoint: usize,
-}
-
-impl AiDriver {
-    pub fn new(car_index: usize) -> Self {
-        let offset_idx = (car_index as isize - 2) as f32;
-        let lateral_offset = offset_idx * AI_LATERAL_OFFSET_SPACING;
-        Self {
-            lateral_offset,
-            current_waypoint: 1,
-        }
-    }
-
-    pub fn compute_input(
-        &mut self,
-        pose: Vec2,
-        heading: f32,
-        forward_speed: f32,
-        track: &Track,
-    ) -> CarInput {
-        let total_wps = track.points.len() - 1;
-        let wp_idx = self.current_waypoint % total_wps;
-        let prev_wp = if wp_idx == 0 {
-            total_wps - 1
-        } else {
-            wp_idx - 1
-        };
-        let next_wp = (wp_idx + 1) % total_wps;
-
-        let p_prev = track.points[prev_wp];
-        let p_curr = track.points[wp_idx];
-        let p_next = track.points[next_wp];
-
-        let seg_in = (p_curr - p_prev).normalize_or_zero();
-        let seg_out = (p_next - p_curr).normalize_or_zero();
-        let normal = Vec2::new(-seg_in.y, seg_in.x);
-
-        let target = p_curr + normal * self.lateral_offset;
-        let to_target = target - pose;
-
-        if to_target.length() < AI_WAYPOINT_CAPTURE_RADIUS {
-            self.current_waypoint = (self.current_waypoint + 1) % total_wps;
-        }
-
-        let corner_angle = seg_in.angle_between(seg_out).abs();
-        let target_speed = if corner_angle > AI_CORNER_ANGLE_THRESHOLD {
-            let sharpness = (corner_angle / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
-            AI_STRAIGHT_TARGET_SPEED * (1.0 - sharpness) + AI_CORNER_TARGET_SPEED * sharpness
-        } else {
-            AI_STRAIGHT_TARGET_SPEED
-        };
-
-        let dist_to_corner = (p_curr - pose).length();
-        let needs_braking =
-            forward_speed > target_speed && dist_to_corner < AI_BRAKE_LOOKAHEAD_DISTANCE;
-
-        let target_angle = to_target.y.atan2(to_target.x);
-        let angle_diff = wrap_angle(target_angle - heading);
-
-        let steer = (angle_diff * AI_STEER_GAIN).clamp(-1.0, 1.0);
-        let (throttle, brake) = if needs_braking {
-            (0.0, 1.0)
-        } else if angle_diff.abs() > 0.5 {
-            (0.4, 0.0)
-        } else {
-            (1.0, 0.0)
-        };
-
-        CarInput {
-            throttle,
-            brake,
-            steer,
-            handbrake: false,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -673,7 +736,7 @@ mod tests {
     fn straight_track() -> Track {
         Track {
             name: "test loop".to_owned(),
-            width: 20.0,
+            widths: vec![20.0; 5],
             points: vec![
                 Vec2::new(0.0, 0.0),
                 Vec2::new(2000.0, 0.0),
@@ -682,6 +745,10 @@ mod tests {
                 Vec2::new(0.0, 0.0),
             ],
             surfaces: vec![Surface::Road; 4],
+            props: Vec::new(),
+            zones: Vec::new(),
+            theme: crate::track::Theme::Hillside,
+            start_segment: 0,
         }
     }
 
@@ -692,6 +759,59 @@ mod tests {
             steer,
             handbrake: false,
         }
+    }
+
+    #[test]
+    fn wrap_angle_normalizes_to_pi_range() {
+        assert_eq!(wrap_angle(0.0), 0.0);
+        assert_eq!(wrap_angle(2.0 * std::f32::consts::PI), 0.0);
+        let pi = std::f32::consts::PI;
+        assert!((wrap_angle(pi + 0.1) - (-pi + 0.1)).abs() < 1e-5);
+        assert!((wrap_angle(-pi - 0.1) - (pi - 0.1)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn terminal_speed_matches_top_speed_const() {
+        let track = straight_track();
+        let full_throttle = vec![
+            CarInput {
+                throttle: 1.0,
+                ..CarInput::default()
+            };
+            640
+        ];
+        let snaps = run(track, &full_throttle);
+        let plateau = snaps.last().unwrap().forward_speed;
+        assert!(
+            (plateau - TOP_SPEED).abs() < 0.5,
+            "terminal speed {plateau} must stay within 0.5 of TOP_SPEED {}",
+            TOP_SPEED
+        );
+    }
+
+    #[test]
+    fn racing_clock_counts_from_green_and_snapshots_project_without_stepping() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new_race(track, 2);
+        assert_eq!(sim.racing_ticks(), 0);
+
+        // Projection without stepping: phase, pose, and countdown intact.
+        let pre = sim.snapshots();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(
+            pre[0].phase,
+            RacePhase::Countdown {
+                ticks_remaining: DEFAULT_COUNTDOWN_TICKS
+            }
+        );
+        assert_eq!(sim.racing_ticks(), 0);
+
+        // The clock counts only green ticks, never countdown ticks.
+        for _ in 0..DEFAULT_COUNTDOWN_TICKS + 5 {
+            sim.tick(&[CarInput::default(), CarInput::default()]);
+        }
+        assert_eq!(sim.racing_ticks(), 5);
+        assert_eq!(sim.snapshots()[0].phase, RacePhase::Racing);
     }
 
     fn run(track: Track, inputs: &[CarInput]) -> Vec<CarSnapshot> {
@@ -712,13 +832,7 @@ mod tests {
         let target = waypoints[*current_wp];
         let to_target = target - *last_pose;
         let target_angle = to_target.y.atan2(to_target.x);
-        let mut angle_diff = target_angle - *last_heading;
-        while angle_diff > std::f32::consts::PI {
-            angle_diff -= 2.0 * std::f32::consts::PI;
-        }
-        while angle_diff < -std::f32::consts::PI {
-            angle_diff += 2.0 * std::f32::consts::PI;
-        }
+        let angle_diff = wrap_angle(target_angle - *last_heading);
 
         let steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
         let throttle = if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 };
@@ -1561,23 +1675,24 @@ mod tests {
         let track = Track::parse(text).unwrap();
         let mut sim = Sim::new(track, 4);
         sim.enable_ai_opponents();
-
+        // Race every Car so the measured profile reflects open-track racing,
+        // not queuing behind a parked leader.
+        sim.set_ai(0, Some(AiDriver::new(0)));
         let mut max_straight_speed = 0.0f32;
         let mut min_corner_speed = 100.0f32;
         for tick in 0..1200 {
             let snaps = sim.tick(&[CarInput::default()]);
             let ai_car = snaps[1];
             let speed = ai_car.forward_speed;
-            // Tick 180..240 is at high speed down the initial straightaway
-            if (180..240).contains(&tick) {
+            // Tick 200..320 is flat out down the initial straightaway
+            if (200..320).contains(&tick) {
                 max_straight_speed = max_straight_speed.max(speed);
             }
-            // Tick 280..380 is navigating corner 1
-            if (280..380).contains(&tick) {
+            // Tick 380..460 is braking into and through corner 1
+            if (380..460).contains(&tick) {
                 min_corner_speed = min_corner_speed.min(speed);
             }
         }
-
         assert!(
             max_straight_speed > 22.0,
             "AI must reach high speed on straight: {max_straight_speed}"
@@ -1589,6 +1704,80 @@ mod tests {
         assert!(
             max_straight_speed > min_corner_speed + 8.0,
             "AI must measurably slow for corner versus straight: straight={max_straight_speed}, corner={min_corner_speed}"
+        );
+    }
+
+    #[test]
+    fn stuck_ai_reverses_out_of_a_wall_and_rejoins() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new(track, 4);
+        sim.enable_ai_opponents();
+        // Stage AI Car 1 nose-into the outer wall along the initial
+        // straight, facing away from the racing surface.
+        sim.cars[1].pose = Vec2::new(60.0, -13.5);
+        sim.cars[1].velocity = Vec2::ZERO;
+        sim.cars[1].heading = -std::f32::consts::FRAC_PI_2;
+
+        let mut reversed = false;
+        let mut rejoined = false;
+        for _ in 0..900 {
+            let snaps = sim.tick(&[CarInput::default()]);
+            if snaps[1].forward_speed < -0.5 {
+                reversed = true;
+            }
+            if reversed && snaps[1].pose.y.abs() < 7.0 {
+                rejoined = true;
+                break;
+            }
+        }
+        assert!(reversed, "stuck AI must engage reverse to recover");
+        assert!(rejoined, "AI must drive back onto the road after reversing");
+    }
+
+    #[test]
+    fn ai_field_races_three_laps_cleanly() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new(track, 4);
+        sim.enable_ai_opponents();
+        sim.set_ai(0, Some(AiDriver::new(0)));
+
+        // Measured 2026-09-07 over this exact race: 4921 ticks, 0 wall
+        // contacts, 0 off-track ticks, 34 drift ticks (0.17%). The sim is
+        // deterministic, so these pins are stable; any wall hit is a driving
+        // regression, not noise.
+        let mut wall_ticks = 0u32;
+        let mut grass_ticks = 0u32;
+        let mut drift_ticks = 0u32;
+        let mut race_ticks = 0u32;
+        let mut leader_best = f32::INFINITY;
+        let mut finished = false;
+        for _ in 0..8000 {
+            let snaps = sim.tick(&[CarInput::default()]);
+            race_ticks += 1;
+            wall_ticks += snaps.iter().filter(|s| s.wall_contact).count() as u32;
+            grass_ticks += snaps.iter().filter(|s| s.surface == Surface::Grass).count() as u32;
+            drift_ticks += snaps.iter().filter(|s| s.drifting).count() as u32;
+            if snaps.iter().all(|s| s.phase == RacePhase::Finished) {
+                leader_best = snaps
+                    .iter()
+                    .filter_map(|s| s.best_lap_time)
+                    .fold(f32::INFINITY, f32::min);
+                finished = true;
+                break;
+            }
+        }
+
+        assert!(finished, "the AI field must complete the 3-lap race");
+        assert_eq!(wall_ticks, 0, "AI must not touch walls on a clean race");
+        assert_eq!(grass_ticks, 0, "AI must stay on authored surfaces");
+        let drift_fraction = drift_ticks as f32 / (race_ticks * 4) as f32;
+        assert!(
+            drift_fraction < 0.01,
+            "planned corners must stay gripped, drifted {drift_fraction:.3} of ticks"
+        );
+        assert!(
+            leader_best < 28.0,
+            "leader pace must beat 28 s/lap, got {leader_best}"
         );
     }
 
@@ -1687,5 +1876,217 @@ mod tests {
             snap_wall.velocity.y > 0.0,
             "AI car normal velocity must reflect off wall"
         );
+    }
+
+    #[test]
+    fn bumper_to_bumper_cars_separate_to_full_visual_length() {
+        // Regression: the old bounding circle (diameter 3.2) never even fired
+        // at this gap, yet the visual cars (~4.3 nose to tail) already
+        // overlapped. The oriented box must hold the full
+        // 2 * CAR_HALF_LENGTH nose-to-tail gap.
+        let mut sim = Sim::new(straight_track(), 2);
+        for (k, x) in [100.0, 103.5].iter().enumerate() {
+            sim.cars[k].pose = Vec2::new(*x, 0.0);
+            sim.cars[k].heading = 0.0;
+            sim.cars[k].velocity = Vec2::ZERO;
+        }
+        sim.tick(&[CarInput::default(), CarInput::default()]);
+        let dist = (sim.cars[1].pose - sim.cars[0].pose).length();
+        assert!(
+            dist >= 2.0 * CAR_HALF_LENGTH - 1e-3,
+            "nose-to-tail cars must rest {} apart, got {dist}",
+            2.0 * CAR_HALF_LENGTH,
+        );
+    }
+
+    #[test]
+    fn side_by_side_cars_separate_to_full_visual_width() {
+        // Same overlap class across the lateral axis: door-to-door cars must
+        // hold 2 * CAR_HALF_WIDTH (outer tire edge to outer tire edge).
+        let mut sim = Sim::new(straight_track(), 2);
+        sim.cars[0].pose = Vec2::new(100.0, 0.0);
+        sim.cars[0].heading = 0.0;
+        sim.cars[0].velocity = Vec2::ZERO;
+        sim.cars[1].pose = Vec2::new(100.0, 1.5);
+        sim.cars[1].heading = 0.0;
+        sim.cars[1].velocity = Vec2::ZERO;
+        sim.tick(&[CarInput::default(), CarInput::default()]);
+        let lateral = (sim.cars[1].pose.y - sim.cars[0].pose.y).abs();
+        assert!(
+            lateral >= 2.0 * CAR_HALF_WIDTH - 1e-3,
+            "side-by-side cars must rest {} apart, got {lateral}",
+            2.0 * CAR_HALF_WIDTH,
+        );
+    }
+
+    #[test]
+    fn clear_side_by_side_cars_are_not_pushed_apart() {
+        // Mirror regression: at 2.8 laterally the boxes (2.6 wide together)
+        // are clear, so the resolver must leave them alone. The old circle
+        // (diameter 3.2) wrongly shoved them apart here.
+        let mut sim = Sim::new(straight_track(), 2);
+        sim.cars[0].pose = Vec2::new(100.0, 0.0);
+        sim.cars[0].heading = 0.0;
+        sim.cars[0].velocity = Vec2::ZERO;
+        sim.cars[1].pose = Vec2::new(100.0, 2.8);
+        sim.cars[1].heading = 0.0;
+        sim.cars[1].velocity = Vec2::ZERO;
+        sim.tick(&[CarInput::default(), CarInput::default()]);
+        let lateral = (sim.cars[1].pose.y - sim.cars[0].pose.y).abs();
+        assert!(
+            (lateral - 2.8).abs() < 1e-3,
+            "clear cars must keep their gap, got {lateral}",
+        );
+    }
+
+    #[test]
+    fn perpendicular_cars_separate_without_overlap() {
+        // A T-bone overlap must resolve on the minimum-penetration axis so no
+        // corner of either box stays inside the other.
+        let mut sim = Sim::new(straight_track(), 2);
+        sim.cars[0].pose = Vec2::new(100.0, 0.0);
+        sim.cars[0].heading = 0.0;
+        sim.cars[0].velocity = Vec2::ZERO;
+        sim.cars[1].pose = Vec2::new(101.0, 0.5);
+        sim.cars[1].heading = std::f32::consts::FRAC_PI_2;
+        sim.cars[1].velocity = Vec2::ZERO;
+        sim.tick(&[CarInput::default(), CarInput::default()]);
+        assert!(
+            obb_penetration(
+                sim.cars[0].pose,
+                sim.cars[0].heading,
+                sim.cars[1].pose,
+                sim.cars[1].heading,
+            )
+            .is_none(),
+            "perpendicular cars must be separated after resolution, got {:?} / {:?}",
+            sim.cars[0].pose,
+            sim.cars[1].pose,
+        );
+    }
+
+    #[test]
+    fn snapshot_carries_applied_steer_for_wheel_visuals() {
+        // The shell renders front-wheel yaw from the snapshot, so the tick
+        // must publish the applied steer and the no-tick projection must keep it.
+        let mut sim = Sim::new(straight_track(), 1);
+        sim.cars[0].velocity = Vec2::new(10.0, 0.0);
+        let snaps = sim.tick(&[hold(0.5, 0.0, 1.0)]);
+        assert_eq!(snaps[0].steer, 1.0);
+        let snaps = sim.tick(&[hold(0.5, 0.0, -0.5)]);
+        assert_eq!(snaps[0].steer, -0.5);
+        assert_eq!(sim.snapshots()[0].steer, -0.5);
+    }
+    /// A small square loop with the start/finish line overridden to segment 2
+    /// (the vertex at (100, 100)). Width 20 gives a checkpoint radius of 30.
+    fn overridden_start_track() -> Track {
+        let text = r#"{
+            "name": "Override",
+            "width": 20.0,
+            "points": [[0,0],[100,0],[100,100],[0,100],[0,0]],
+            "surfaces": [],
+            "start_line": {"segment": 2}
+        }"#;
+        Track::parse(text).unwrap()
+    }
+
+    /// Teleports a car onto a checkpoint with lawful entry velocity, then
+    /// steps one tick and returns the snapshot.
+    fn cross_checkpoint(sim: &mut Sim, at: Vec2, velocity: Vec2) -> CarSnapshot {
+        sim.cars[0].pose = at;
+        sim.cars[0].velocity = velocity;
+        sim.tick(&[CarInput::default()])[0]
+    }
+
+    #[test]
+    fn overridden_start_line_shifts_grid_spawn() {
+        let track = overridden_start_track();
+        assert_eq!(track.start_segment, 2);
+        let mut sim = Sim::new(track.clone(), 3);
+        let snaps = sim.tick(&[]);
+
+        // Lead car stages exactly on the overridden line's vertex.
+        assert_eq!(snaps[0].pose, Vec2::new(100.0, 100.0));
+        // Trailing cars stage behind the line along the loop, facing the
+        // leg they stage on (+y up segment 1).
+        assert_eq!(snaps[1].pose, track.spawn_pose(5.0));
+        assert_eq!(snaps[1].pose, Vec2::new(100.0, 95.0));
+        assert_eq!(snaps[2].pose, track.spawn_pose(10.0));
+        for snap in &snaps {
+            assert!(
+                (snap.heading - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+                "grid must face the overridden leg, got {}",
+                snap.heading
+            );
+        }
+    }
+
+    #[test]
+    fn overridden_start_line_shifts_lap_origin_and_completion() {
+        let track = overridden_start_track();
+        let mut sim = Sim::new(track, 1);
+
+        // Crossing the old line (vertex 0) out of order clears nothing.
+        let snap = cross_checkpoint(&mut sim, Vec2::new(0.0, 0.0), Vec2::new(0.0, -10.0));
+        assert_eq!(snap.completed_laps, 0);
+        // Teleporting straight onto the overridden line out of order clears
+        // nothing either.
+        let snap = cross_checkpoint(&mut sim, Vec2::new(100.0, 100.0), Vec2::new(0.0, 10.0));
+        assert_eq!(snap.completed_laps, 0);
+
+        // Walk the ordered checkpoints starting after the overridden line:
+        // 3 -> 0 -> 1 -> 2 completes exactly one lap at the overridden line.
+        let legs = [
+            (Vec2::new(0.0, 100.0), Vec2::new(-10.0, 0.0)),
+            (Vec2::new(0.0, 0.0), Vec2::new(0.0, -10.0)),
+            (Vec2::new(100.0, 0.0), Vec2::new(10.0, 0.0)),
+        ];
+        for (at, velocity) in legs {
+            let snap = cross_checkpoint(&mut sim, at, velocity);
+            assert_eq!(snap.completed_laps, 0);
+        }
+        let snap = cross_checkpoint(&mut sim, Vec2::new(100.0, 100.0), Vec2::new(0.0, 10.0));
+        assert_eq!(snap.completed_laps, 1);
+        assert!(snap.lap_times[0].is_some());
+    }
+
+    #[test]
+    fn checkpoint_radius_follows_local_vertex_width() {
+        // Straight ramp: widths 10 -> 30 -> 30 -> 10. Checkpoint 1 sits on
+        // the wide vertex (120, 0): its clearing radius is 30 * 1.5 = 45.
+        // The global-minimum floor (10 * 1.5 = 15) would refuse a 30-unit
+        // clear, breaking the ordered walk below.
+        let track = Track::parse(
+            r#"{
+                "name": "Ramp",
+                "width": 10.0,
+                "widths": [10.0, 30.0, 30.0, 10.0, 10.0],
+                "points": [[0,0],[120,0],[120,60],[0,60],[0,0]],
+                "surfaces": []
+            }"#,
+        )
+        .unwrap();
+        let mut sim = Sim::new(track, 1);
+
+        // Thirty units short of checkpoint 1, charging at it: clears under
+        // the local radius, misses under the global-minimum radius.
+        let snap = cross_checkpoint(&mut sim, Vec2::new(90.0, 0.0), Vec2::new(20.0, 0.0));
+        assert_eq!(snap.completed_laps, 0);
+
+        // Walk the remaining ordered checkpoints to the start line.
+        let legs = [
+            (Vec2::new(120.0, 60.0), Vec2::new(0.0, 20.0)),
+            (Vec2::new(0.0, 60.0), Vec2::new(-20.0, 0.0)),
+        ];
+        for (at, velocity) in legs {
+            let snap = cross_checkpoint(&mut sim, at, velocity);
+            assert_eq!(snap.completed_laps, 0);
+        }
+        let snap = cross_checkpoint(&mut sim, Vec2::new(0.0, 0.0), Vec2::new(0.0, -20.0));
+        assert_eq!(
+            snap.completed_laps, 1,
+            "30-unit clear of the wide checkpoint must hold"
+        );
+        assert!(snap.lap_times[0].is_some());
     }
 }

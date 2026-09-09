@@ -1,0 +1,57 @@
+GIMP Palette
+Name: Topdown Racer Golden Hour (Endesga 32 remap)
+Columns: 8
+# Topdown Racer project palette: "golden hour", a 32-color remap of Endesga 32.
+# Source palette: Endesga 32 by ENDESGA (originally for NYKRA),
+# https://lospec.com/palette-list/endesga-32 (32 colors, fetched 2026-09-08).
+# This file is the authoring source of truth: all future art quantizes to it.
+# No runtime loading code reads this file; it is documentation for artists.
+# Remap recipe (golden-hour, deliberately raised contrast):
+# - grass ramps shift warm (olive-to-golden, sunlit straw top end)
+# - asphalt is a dark neutral charcoal ramp (darkest pushed near-black,
+#   lighter worn tone kept for edge contrast)
+# - kerb red pushed to full saturation
+# - added deep near-black shadow tone + warm cream highlight
+# - tree foliage darker and cooler than grass
+# - exactly one amber accent
+# Ramps are ordered shadow/base/light within each material family.
+# --- Shadow anchors (near-black tone + soft outline dark) ---
+13 10 20	Void Shadow #0d0a14
+37 29 51	Dusk Outline #251d33
+# --- Grass ramp (warm olive to golden) ---
+76 90 36	Grass Shadow #4c5a24
+110 124 48	Grass Base #6e7c30
+154 160 64	Grass Light #9aa040
+207 161 74	Dry Gold #cfa14a
+236 205 109	Sunlit Straw #eccd6d
+# --- Foliage ramp (darker and cooler than grass) + trunk ---
+31 58 42	Foliage Shadow #1f3a2a
+44 90 54	Foliage Base #2c5a36
+74 122 68	Foliage Light #4a7a44
+74 50 38	Trunk Bark #4a3226
+# --- Dirt / sand Terrain Zone ramp ---
+95 63 44	Dirt Shadow #5f3f2c
+150 96 58	Dirt Base #96603a
+216 154 94	Dirt Light #d89a5e
+# --- Asphalt ramp (dark neutral charcoal; worn light kept for contrast) ---
+18 16 22	Asphalt Darkest #121016
+35 32 45	Asphalt Base #23202d
+59 55 72	Asphalt Light #3b3748
+125 118 136	Worn Edge #7d7688
+# --- Kerb red ramp (saturated) ---
+124 22 38	Kerb Shadow #7c1626
+216 38 60	Kerb Base #d8263c
+255 106 82	Kerb Light #ff6a52
+# --- Car Sprite liveries (player blue is the boldest; shared glass) ---
+15 143 201	Player Blue #0f8fc9
+237 241 244	Rival White #edf1f4
+239 106 31	Rival Orange #ef6a1f
+160 74 134	Rival Plum #a04a86
+27 38 50	Glass Dark #1b2632
+# --- Light and signal (warm cream highlight, one amber accent) ---
+255 243 212	Cream Highlight #fff3d4
+255 181 46	Amber Accent #ffb52e
+55 223 232	Signal Cyan #37dfe8
+255 59 77	Brakelight Red #ff3b4d
+23 63 102	Water Deep #173f66
+230 211 163	Kerb Bone #e6d3a3
