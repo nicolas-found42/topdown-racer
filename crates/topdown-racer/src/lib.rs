@@ -811,10 +811,11 @@ mod tests {
     fn setup_track_renders_the_baked_canvas_as_one_quad() {
         use bevy::render::texture::{ImageFilterMode, ImageSampler};
 
-        assert!(world_z::BAKE < world_z::SKID);
-        assert!(world_z::SKID < world_z::SCENERY);
-        assert!(world_z::SCENERY < world_z::CAR);
-        assert!(world_z::CAR < world_z::FX);
+        // Strictly ordered z-stack, pinned at compile time.
+        const { assert!(world_z::BAKE < world_z::SKID) };
+        const { assert!(world_z::SKID < world_z::SCENERY) };
+        const { assert!(world_z::SCENERY < world_z::CAR) };
+        const { assert!(world_z::CAR < world_z::FX) };
 
         let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
         let canvas = bake_world(&build_track_geometry(&track), track.theme);
