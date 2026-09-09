@@ -42,7 +42,6 @@ pub use world_bake::{bake_world, WorldCanvas, TEXELS_PER_UNIT};
 use bevy::prelude::*;
 use glam::Vec2;
 use topdown_racer_core::{
-    ai::AiDriver,
     simulation::{CarInput, CarSnapshot, Sim, FIXED_HZ},
     track::{PropKind, Track, SAMPLE_CIRCUIT},
 };
@@ -97,6 +96,7 @@ pub const TOTAL_RACE_CARS: usize = 4;
 /// Resource holding simulation state and consecutive snapshots for render interpolation.
 #[derive(Resource)]
 pub struct ShellSimulation {
+    pub selected_pace: topdown_racer_core::ai::OpponentPace,
     pub sim: Sim,
     pub prev_snapshots: Vec<CarSnapshot>,
     pub curr_snapshots: Vec<CarSnapshot>,
@@ -107,10 +107,10 @@ impl ShellSimulation {
         Self::from_sim(Sim::new_race(track, TOTAL_RACE_CARS))
     }
 
-    fn from_sim(mut sim: Sim) -> Self {
-        sim.set_ai(0, Some(AiDriver::new(0)));
+    fn from_sim(sim: Sim) -> Self {
         let initial = sim.snapshots();
         Self {
+            selected_pace: sim.opponent_pace(),
             sim,
             prev_snapshots: initial.clone(),
             curr_snapshots: initial,
@@ -121,11 +121,13 @@ impl ShellSimulation {
     /// player's autopilot toggle across the reset.
     pub fn reset_to_fresh_race(&mut self) {
         let track = self.sim.track().clone();
-        let autopilot = self.sim.ai_enabled(0);
-        *self = Self::from_sim(Sim::new_race(track, TOTAL_RACE_CARS));
-        if !autopilot {
-            self.sim.set_ai(0, None);
-        }
+        let mode = self.sim.player_mode();
+        *self = Self::from_sim(Sim::new_race_with_pace(
+            track,
+            TOTAL_RACE_CARS,
+            self.selected_pace,
+        ));
+        self.sim.request_player_mode(mode);
     }
 }
 
@@ -143,6 +145,7 @@ impl Plugin for RacerGamePlugin {
             .insert_resource(ShellSimulation::new(track))
             .insert_resource(SavedBestLap(load_best_lap(&default_best_lap_path())))
             .init_resource::<PlayerInput>()
+            .init_resource::<ControlGate>()
             .insert_resource(FrameCapture {
                 active: capture_frames,
                 ..default()
@@ -169,7 +172,13 @@ impl Plugin for RacerGamePlugin {
             .add_systems(OnExit(AppState::Results), despawn_screens)
             .add_systems(
                 PreUpdate,
-                read_keyboard_input.run_if(in_state(AppState::Race)),
+                (
+                    toggle_autopilot_system
+                        .run_if(in_state(AppState::Menu).or_else(in_state(AppState::Race))),
+                    read_keyboard_input.run_if(in_state(AppState::Race)),
+                )
+                    .chain()
+                    .after(bevy::input::InputSystem),
             )
             .add_systems(
                 FixedUpdate,
@@ -179,12 +188,13 @@ impl Plugin for RacerGamePlugin {
                 Update,
                 (
                     update_letterbox,
+                    scale_ui_to_window,
+                    menu::update_driving_summary,
                     interpolate_car_and_camera.run_if(in_state(AppState::Race)),
                     update_front_wheel_steer.run_if(in_state(AppState::Race)),
                     update_hud.run_if(in_state(AppState::Race)),
                     update_countdown_overlay.run_if(in_state(AppState::Race)),
                     update_audio.run_if(in_state(AppState::Race)),
-                    toggle_autopilot_system.run_if(in_state(AppState::Race)),
                     frame_capture_system,
                 ),
             );
@@ -323,6 +333,10 @@ fn setup_car(mut commands: Commands, asset_server: Res<AssetServer>, sim: Res<Sh
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
 pub struct PlayerInput(pub CarInput);
 
+/// Held movement keys must return to neutral after ownership or screen changes.
+#[derive(Resource, Default)]
+pub struct ControlGate(bool);
+
 /// Pure function mapping keyboard boolean states to `CarInput`.
 ///
 /// Controls:
@@ -360,13 +374,18 @@ pub fn map_keyboard_input(
 pub fn read_keyboard_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut player_input: ResMut<PlayerInput>,
+    mut gate: ResMut<ControlGate>,
 ) {
     let up = keyboard.any_pressed([KeyCode::ArrowUp, KeyCode::KeyW]);
     let down = keyboard.any_pressed([KeyCode::ArrowDown, KeyCode::KeyS]);
     let left = keyboard.any_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]);
     let right = keyboard.any_pressed([KeyCode::ArrowRight, KeyCode::KeyD]);
     let handbrake = keyboard.pressed(KeyCode::Space);
-    player_input.0 = map_keyboard_input(up, down, left, right, handbrake);
+    let input = map_keyboard_input(up, down, left, right, handbrake);
+    if gate.0 && !(up || down || left || right || handbrake) {
+        gate.0 = false;
+    }
+    player_input.0 = if gate.0 { CarInput::default() } else { input };
 }
 
 /// Fixed step system: advances the simulation at 64 Hz using mapped player
@@ -402,12 +421,14 @@ pub(crate) fn update_front_wheel_steer(
 pub fn toggle_autopilot_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut shell: ResMut<ShellSimulation>,
+    mut gate: ResMut<ControlGate>,
+    mut input: ResMut<PlayerInput>,
 ) {
     if keyboard.just_pressed(KeyCode::KeyT) {
-        let on = shell.sim.ai_enabled(0);
-        shell
-            .sim
-            .set_ai(0, if on { None } else { Some(AiDriver::new(0)) });
+        let mode = shell.sim.player_mode().toggled();
+        shell.sim.request_player_mode(mode);
+        gate.0 = true;
+        input.0 = CarInput::default();
     }
 }
 
@@ -422,6 +443,15 @@ mod tests {
 
     /// The sample circuit ships as a real data file next to the crate, not
     /// just as an embedded string.
+    #[test]
+    fn new_shell_defaults_to_manual() {
+        let mut shell = ShellSimulation::new(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        assert!(!shell.sim.ai_enabled(0));
+        for _ in 0..240 {
+            assert_eq!(shell.sim.tick(&[])[0].throttle, 0.0);
+        }
+    }
+
     #[test]
     fn sample_track_data_ships_on_disk_and_parses() {
         let text = std::fs::read_to_string(SAMPLE_TRACK_PATH).unwrap();
@@ -490,6 +520,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<PlayerInput>()
+            .init_resource::<ControlGate>()
             .add_systems(Update, read_keyboard_input);
 
         // Test WASD + Space
@@ -523,6 +554,53 @@ mod tests {
             assert_eq!(player_input.0.steer, -1.0);
             assert!(!player_input.0.handbrake);
         }
+    }
+
+    #[test]
+    fn toggling_to_manual_requires_held_controls_to_be_released() {
+        let mut app = App::new();
+        let mut shell = ShellSimulation::new(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        shell
+            .sim
+            .request_player_mode(topdown_racer_core::simulation::DrivingMode::Autopilot);
+        shell.sim.tick(&[]);
+        app.insert_resource(shell)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<PlayerInput>()
+            .init_resource::<ControlGate>()
+            .add_systems(
+                Update,
+                (
+                    toggle_autopilot_system,
+                    read_keyboard_input,
+                    step_simulation,
+                )
+                    .chain(),
+            );
+        {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(KeyCode::KeyW);
+            keys.press(KeyCode::KeyA);
+            keys.press(KeyCode::KeyT);
+        }
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        for _ in 0..5 {
+            app.update();
+            let snap = app.world().resource::<ShellSimulation>().curr_snapshots[0];
+            assert_eq!((snap.throttle, snap.steer), (0.0, 0.0));
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.update();
+        assert_eq!(app.world().resource::<PlayerInput>().0.throttle, 1.0);
     }
 
     #[test]
@@ -652,7 +730,7 @@ mod tests {
     fn reset_preserves_the_autopilot_toggle() {
         let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
         let mut shell = ShellSimulation::new(track);
-        assert!(shell.sim.ai_enabled(0), "autopilot starts enabled");
+        assert!(!shell.sim.ai_enabled(0), "Manual starts enabled");
 
         shell.sim.set_ai(0, None);
         shell.reset_to_fresh_race();
@@ -661,10 +739,12 @@ mod tests {
             "a disabled autopilot toggle must survive a race reset"
         );
 
-        shell.sim.set_ai(0, Some(AiDriver::new(0)));
+        shell
+            .sim
+            .request_player_mode(topdown_racer_core::simulation::DrivingMode::Autopilot);
         shell.reset_to_fresh_race();
         assert!(
-            shell.sim.ai_enabled(0),
+            shell.sim.player_mode() == topdown_racer_core::simulation::DrivingMode::Autopilot,
             "an enabled autopilot toggle must survive a race reset"
         );
     }
@@ -821,5 +901,17 @@ mod tests {
             }
         }
         assert_eq!((bake, scenery), (1, 1), "one bake quad, one tree");
+    }
+}
+
+/// Keep the menus and labels inside the supported 640x360 minimum window.
+fn scale_ui_to_window(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut scale: ResMut<UiScale>,
+) {
+    if let Ok(window) = windows.get_single() {
+        scale.0 = (window.width() / 960.0)
+            .min(window.height() / 600.0)
+            .clamp(0.5, 1.0);
     }
 }

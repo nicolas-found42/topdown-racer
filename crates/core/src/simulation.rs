@@ -4,7 +4,7 @@
 
 use glam::Vec2;
 
-use crate::ai::{AiDriver, AiView};
+use crate::ai::{AiDriver, AiView, OpponentPace};
 use crate::track::{Surface, Track};
 
 /// Fixed simulation rate in steps per second.
@@ -38,6 +38,23 @@ impl Default for CarInput {
     }
 }
 
+/// Explicit owner of the player's controls for a fixed tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrivingMode {
+    #[default]
+    Manual,
+    Autopilot,
+}
+
+impl DrivingMode {
+    pub fn label(self) -> &'static str {
+        match self { Self::Manual => "MANUAL", Self::Autopilot => "DEMO / AUTOPILOT" }
+    }
+    pub fn toggled(self) -> Self {
+        match self { Self::Manual => Self::Autopilot, Self::Autopilot => Self::Manual }
+    }
+}
+
 /// Standard race length in completed laps.
 pub const TOTAL_LAPS: u32 = 3;
 
@@ -58,6 +75,12 @@ pub enum RacePhase {
 /// One Car's externally observable state after a tick.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CarSnapshot {
+    pub driving_mode: DrivingMode,
+    /// Sticky until the current lap ends, including after returning to Manual.
+    pub current_lap_assisted: bool,
+    pub lap_assisted: [bool; TOTAL_LAPS as usize],
+    /// Best wholly Manual flying lap eligible for the legacy record.
+    pub best_manual_lap_time: Option<f32>,
     /// World position.
     pub pose: Vec2,
     /// Heading in radians; 0 faces +x, positive is counter-clockwise.
@@ -79,6 +102,9 @@ pub struct CarSnapshot {
     pub surface: Surface,
     /// Whether the Car contacted a boundary wall during this tick.
     pub wall_contact: bool,
+    pub car_contact: bool,
+    /// Largest pre-impulse closing speed along a Car contact normal this tick.
+    pub car_contact_speed: f32,
     /// Whether the Car is currently in a controlled Drift state.
     pub drifting: bool,
     /// Current phase of the Race.
@@ -95,6 +121,15 @@ pub struct CarSnapshot {
     pub position: usize,
 }
 
+/// Initial Car motion for a deterministic rolling grid or encounter. These
+/// are initial conditions only: subsequent movement always goes through physics.
+#[derive(Debug, Clone, Copy)]
+pub struct GridCar {
+    pub pose: Vec2,
+    pub heading: f32,
+    pub velocity: Vec2,
+}
+
 /// The headless world: Cars advancing over a Track at the fixed step.
 pub struct Sim {
     track: Track,
@@ -103,6 +138,8 @@ pub struct Sim {
     /// Fixed ticks elapsed since the race phase began (green). The Race clock
     /// lives in the simulation so every consumer (HUD, overlays) reads one clock.
     racing_ticks: u32,
+    pending_player_mode: Option<DrivingMode>,
+    opponent_pace: OpponentPace,
 }
 
 struct CarState {
@@ -113,6 +150,8 @@ struct CarState {
     throttle: f32,
     brake: f32,
     handbrake: bool,
+    car_contact: bool,
+    car_contact_speed: f32,
     reverse: bool,
     standstill_ticks: u32,
     completed_laps: u32,
@@ -122,6 +161,9 @@ struct CarState {
     lap_times: [Option<f32>; TOTAL_LAPS as usize],
     best_lap_time: Option<f32>,
     ai: Option<AiDriver>,
+    current_lap_assisted: bool,
+    lap_assisted: [bool; TOTAL_LAPS as usize],
+    best_manual_lap_time: Option<f32>,
 }
 impl Sim {
     /// Builds a sim with `car_count` Cars staged behind the Track's start
@@ -130,8 +172,30 @@ impl Sim {
         Self::new_with_phase(track, car_count, RacePhase::Racing)
     }
 
+    /// Starts a rolling grid with fresh lap state and no drivers attached.
+    /// Callers provide finite poses, headings and velocities; checkpoints begin
+    /// after each Car's nearest Track segment, so no progress is fabricated.
+    pub fn from_grid(track: Track, grid: &[GridCar]) -> Sim {
+        let mut sim = Self::new(track, grid.len());
+        let checkpoints = sim.track.points.len() - 1;
+        for (car, initial) in sim.cars.iter_mut().zip(grid) {
+            assert!(initial.pose.is_finite() && initial.heading.is_finite() && initial.velocity.is_finite());
+            car.pose = initial.pose;
+            car.heading = initial.heading;
+            car.velocity = initial.velocity;
+            let segment = sim.track.nearest_segment(initial.pose).segment_index;
+            car.last_cleared_checkpoint = segment;
+            car.next_checkpoint = (segment + 1) % checkpoints;
+        }
+        sim
+    }
+
     /// Builds a full race sim starting in the `Countdown` phase with AI opponents.
     pub fn new_race(track: Track, car_count: usize) -> Sim {
+        Self::new_race_with_pace(track, car_count, OpponentPace::default())
+    }
+
+    pub fn new_race_with_pace(track: Track, car_count: usize, pace: OpponentPace) -> Sim {
         let mut sim = Self::new_with_phase(
             track,
             car_count,
@@ -139,6 +203,7 @@ impl Sim {
                 ticks_remaining: DEFAULT_COUNTDOWN_TICKS,
             },
         );
+        sim.opponent_pace = pace;
         sim.enable_ai_opponents();
         sim
     }
@@ -163,6 +228,8 @@ impl Sim {
                     throttle: 0.0,
                     brake: 0.0,
                     handbrake: false,
+                    car_contact: false,
+                    car_contact_speed: 0.0,
                     reverse: false,
                     standstill_ticks: 0,
                     completed_laps: 0,
@@ -172,6 +239,9 @@ impl Sim {
                     lap_times: [None; TOTAL_LAPS as usize],
                     best_lap_time: None,
                     ai: None,
+                    current_lap_assisted: false,
+                    lap_assisted: [false; TOTAL_LAPS as usize],
+                    best_manual_lap_time: None,
                 }
             })
             .collect();
@@ -180,13 +250,15 @@ impl Sim {
             cars,
             phase,
             racing_ticks: 0,
+            pending_player_mode: None,
+            opponent_pace: OpponentPace::default(),
         }
     }
 
     /// Enables AI driver controllers for trailing cars (indices 1..car_count).
     pub fn enable_ai_opponents(&mut self) {
         for (i, car) in self.cars.iter_mut().enumerate().skip(1) {
-            car.ai = Some(AiDriver::new(i));
+            car.ai = Some(AiDriver::with_pace(i, self.opponent_pace));
         }
     }
 
@@ -196,6 +268,24 @@ impl Sim {
             car.ai = ai;
         }
     }
+
+    /// Queues ownership for the next fixed step, which discards stale player input.
+    pub fn request_player_mode(&mut self, mode: DrivingMode) {
+        self.pending_player_mode = Some(mode);
+    }
+
+    /// Visible selection, including a change awaiting the next fixed tick.
+    pub fn player_mode(&self) -> DrivingMode {
+        self.pending_player_mode.unwrap_or(if self.ai_enabled(0) {
+            DrivingMode::Autopilot
+        } else { DrivingMode::Manual })
+    }
+
+    pub fn pass_stats(&self, car_index: usize) -> Option<crate::ai::PassStats> {
+        self.cars.get(car_index)?.ai.as_ref().map(AiDriver::pass_stats)
+    }
+
+    pub fn opponent_pace(&self) -> OpponentPace { self.opponent_pace }
 
     /// The parsed Track this sim runs on.
     pub fn track(&self) -> &Track {
@@ -229,6 +319,13 @@ impl Sim {
     /// cars, the internal AI driver computes input unless overridden by an explicit
     /// entry in `inputs`.
     pub fn tick(&mut self, inputs: &[CarInput]) -> Vec<CarSnapshot> {
+        let switching = self.pending_player_mode.take();
+        if let Some(mode) = switching {
+            self.set_ai(0, match mode {
+                DrivingMode::Manual => None,
+                DrivingMode::Autopilot => Some(AiDriver::new(0)),
+            });
+        }
         // Phase management: countdown progression
         let controls_locked = match &mut self.phase {
             RacePhase::Countdown { ticks_remaining } => {
@@ -261,7 +358,7 @@ impl Sim {
             let effective_input = if controls_locked {
                 CarInput::default()
             } else if let Some(ai) = &mut car.ai {
-                if inputs.len() > i && inputs[i] != CarInput::default() {
+                if i != 0 && inputs.len() > i && inputs[i] != CarInput::default() {
                     inputs[i]
                 } else {
                     ai.compute_input(AiView {
@@ -273,6 +370,8 @@ impl Sim {
                         field: &field,
                     })
                 }
+            } else if i == 0 && switching.is_some() {
+                CarInput::default()
             } else {
                 inputs.get(i).copied().unwrap_or_default()
             };
@@ -286,6 +385,7 @@ impl Sim {
 
             // In Racing phase, accumulate lap time and check ordered progress
             if self.phase == RacePhase::Racing {
+                car.current_lap_assisted |= car.ai.is_some();
                 advance_lap_progress(car, &self.track, total_cps);
             }
         }
@@ -345,6 +445,10 @@ impl Sim {
         phase: RacePhase,
     ) -> CarSnapshot {
         CarSnapshot {
+            driving_mode: if car.ai.is_some() { DrivingMode::Autopilot } else { DrivingMode::Manual },
+            current_lap_assisted: car.current_lap_assisted,
+            lap_assisted: car.lap_assisted,
+            best_manual_lap_time: car.best_manual_lap_time,
             pose: car.pose,
             heading: car.heading,
             velocity: car.velocity,
@@ -355,6 +459,8 @@ impl Sim {
             handbrake: car.handbrake,
             surface,
             wall_contact,
+            car_contact: car.car_contact,
+            car_contact_speed: car.car_contact_speed,
             drifting,
             phase,
             completed_laps: car.completed_laps,
@@ -423,6 +529,11 @@ fn advance_lap_progress(car: &mut CarState, track: &Track, total_cps: usize) {
                     Some(best) => best.min(lap_time),
                     None => lap_time,
                 });
+                car.lap_assisted[car.completed_laps as usize] = car.current_lap_assisted;
+                if !car.current_lap_assisted && car.completed_laps > 0 {
+                    car.best_manual_lap_time = Some(car.best_manual_lap_time.map_or(lap_time, |best| best.min(lap_time)));
+                }
+                car.current_lap_assisted = false;
                 car.completed_laps += 1;
                 car.current_lap_ticks = 0;
             }
@@ -677,6 +788,7 @@ pub const CAR_COLLISION_RESTITUTION: f32 = 0.5;
 /// full unit before the resolver engaged. The box matches the rendered
 /// chassis, nose, wing, and tire extents.
 fn resolve_car_collisions(cars: &mut [CarState]) {
+    for car in cars.iter_mut() { car.car_contact = false; car.car_contact_speed = 0.0; }
     let num_cars = cars.len();
     for i in 0..num_cars {
         for j in (i + 1)..num_cars {
@@ -688,6 +800,10 @@ fn resolve_car_collisions(cars: &mut [CarState]) {
 
                 let rel_vel = cars[j].velocity - cars[i].velocity;
                 let vn = rel_vel.dot(normal);
+                cars[i].car_contact = true;
+                cars[j].car_contact = true;
+                cars[i].car_contact_speed = cars[i].car_contact_speed.max((-vn).max(0.0));
+                cars[j].car_contact_speed = cars[j].car_contact_speed.max((-vn).max(0.0));
                 if vn < 0.0 {
                     let impulse = -(1.0 + CAR_COLLISION_RESTITUTION) * vn * 0.5;
                     cars[i].velocity -= normal * impulse;

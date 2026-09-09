@@ -100,7 +100,7 @@ pub fn persist_best_lap_on_finish(shell: Res<ShellSimulation>, mut saved: ResMut
     let Some(player_snap) = shell.curr_snapshots.first() else {
         return;
     };
-    if let Some(best) = player_snap.best_lap_time {
+    if let Some(best) = player_snap.best_manual_lap_time {
         match maybe_save_best_lap(&default_best_lap_path(), best) {
             Ok(stored) => saved.0 = stored,
             Err(err) => warn!("failed to persist best lap: {err}"),

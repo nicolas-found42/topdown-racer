@@ -29,11 +29,13 @@ pub enum AppState {
 impl Plugin for RaceLifecyclePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<AppState>()
+            .init_resource::<crate::ControlGate>()
+            .init_resource::<crate::PlayerInput>()
             .add_systems(OnEnter(AppState::Race), reset_race_on_enter)
             .add_systems(
                 Update,
                 (
-                    menu_action_system.run_if(in_state(AppState::Menu)),
+                    (crate::menu::select_pace_system, menu_action_system).chain().run_if(in_state(AppState::Menu)),
                     esc_to_menu_system.run_if(in_state(AppState::Race)),
                     detect_race_finish.run_if(in_state(AppState::Race)),
                     results_action_system.run_if(in_state(AppState::Results)),
@@ -50,8 +52,10 @@ pub fn auto_start_race(mut next_state: ResMut<NextState<AppState>>) {
 }
 
 /// Rebuilds a fresh countdown race whenever entering the Race state.
-pub fn reset_race_on_enter(mut shell: ResMut<ShellSimulation>) {
+pub fn reset_race_on_enter(mut shell: ResMut<ShellSimulation>, mut gate: ResMut<crate::ControlGate>, mut input: ResMut<crate::PlayerInput>) {
     shell.reset_to_fresh_race();
+    gate.0 = true;
+    input.0 = Default::default();
 }
 
 /// Starts the race from the menu via the start button or the Enter key.
@@ -134,6 +138,7 @@ mod tests {
 
         let sim = Sim::new_with_phase(track, 4, RacePhase::Finished);
         app.insert_resource(ShellSimulation {
+            selected_pace: Default::default(),
             curr_snapshots: sim.snapshots(),
             prev_snapshots: sim.snapshots(),
             sim,
@@ -156,6 +161,22 @@ mod tests {
     fn settle(app: &mut App) {
         app.update();
         app.update();
+    }
+
+    #[test]
+    fn menu_pace_selection_is_fixed_after_start_and_survives_restart() {
+        use topdown_racer_core::ai::OpponentPace;
+        let mut app = lifecycle_app(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        press(&mut app, KeyCode::Digit1);
+        settle(&mut app);
+        press(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        assert_eq!(app.world().resource::<ShellSimulation>().sim.opponent_pace(), OpponentPace::Touring);
+        press(&mut app, KeyCode::Digit3);
+        settle(&mut app);
+        assert_eq!(app.world().resource::<ShellSimulation>().sim.opponent_pace(), OpponentPace::Touring);
+        app.world_mut().resource_mut::<ShellSimulation>().reset_to_fresh_race();
+        assert_eq!(app.world().resource::<ShellSimulation>().sim.opponent_pace(), OpponentPace::Touring);
     }
 
     #[test]

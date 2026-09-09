@@ -66,7 +66,8 @@ pub(crate) fn setup_hud(mut commands: Commands) {
                     width: Val::Percent(100.0),
                     height: Val::Percent(100.0),
                     position_type: PositionType::Absolute,
-                    justify_content: JustifyContent::SpaceBetween,
+                    justify_content: JustifyContent::FlexStart,
+                    row_gap: Val::Px(8.0),
                     flex_direction: FlexDirection::Column,
                     padding: UiRect::all(Val::Px(16.0)),
                     ..default()
@@ -77,6 +78,12 @@ pub(crate) fn setup_hud(mut commands: Commands) {
             HudRoot,
         ))
         .with_children(|root| {
+            root.spawn(TextBundle::from_section("T: toggle mode  |  W/S: throttle / brake + reverse  |  A/D: steer  |  Space: handbrake", TextStyle {
+                font_size: 14.0, color: Color::WHITE, ..default()
+            }));
+            root.spawn((TextBundle::from_section("", TextStyle {
+                font_size: 18.0, color: Color::srgb(1.0, 0.85, 0.3), ..default()
+            }), crate::menu::DrivingSummary));
             // Top bar
             root.spawn(NodeBundle {
                 style: Style {
@@ -134,6 +141,7 @@ pub(crate) fn setup_hud(mut commands: Commands) {
                 style: Style {
                     width: Val::Percent(100.0),
                     justify_content: JustifyContent::FlexEnd,
+                    margin: UiRect::top(Val::Auto),
                     ..default()
                 },
                 ..default()
@@ -266,6 +274,12 @@ pub(crate) fn sample_snapshot() -> CarSnapshot {
     use topdown_racer_core::simulation::RacePhase;
     use topdown_racer_core::track::Surface;
     CarSnapshot {
+        driving_mode: Default::default(),
+        current_lap_assisted: false,
+        lap_assisted: [false; 3],
+        best_manual_lap_time: None,
+        car_contact: false,
+        car_contact_speed: 0.0,
         pose: Vec2::ZERO,
         heading: 0.0,
         velocity: Vec2::ZERO,

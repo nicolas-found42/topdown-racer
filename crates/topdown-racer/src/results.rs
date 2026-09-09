@@ -32,7 +32,8 @@ pub fn format_results(snaps: &[CarSnapshot]) -> Vec<ResultRow> {
             let lap_times = snap
                 .lap_times
                 .iter()
-                .map(|t| format_opt_lap_time(*t))
+                .enumerate()
+                .map(|(i, t)| { let time = format_opt_lap_time(*t); if snap.lap_assisted[i] { format!("{time} AUTO") } else { time } })
                 .collect();
             let best_lap = format_opt_lap_time(snap.best_lap_time);
             ResultRow {
@@ -63,6 +64,9 @@ pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
                     ..default()
                 },
             ));
+            results.spawn(TextBundle::from_section(crate::menu::driving_summary(&shell), TextStyle {
+                font_size: 18.0, color: Color::srgb(1.0, 0.85, 0.3), ..default()
+            }));
             for row in &rows {
                 let laps = row.lap_times.join("  ");
                 results.spawn(TextBundle::from_section(
@@ -110,6 +114,15 @@ mod tests {
         snap.best_lap_time = best_lap_time;
         snap.phase = topdown_racer_core::simulation::RacePhase::Finished;
         snap
+    }
+
+    #[test]
+    fn assisted_lap_stays_labelled_in_manual_results() {
+        let mut snap = results_snapshot(1, [Some(25.0), Some(24.0), None], Some(24.0));
+        snap.lap_assisted[0] = true;
+        let rows = format_results(&[snap]);
+        assert!(rows[0].lap_times[0].contains("AUTO"));
+        assert!(!rows[0].lap_times[1].contains("AUTO"));
     }
 
     #[test]
