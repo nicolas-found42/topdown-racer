@@ -736,7 +736,6 @@ mod tests {
     fn straight_track() -> Track {
         Track {
             name: "test loop".to_owned(),
-            width: 20.0,
             widths: vec![20.0; 5],
             points: vec![
                 Vec2::new(0.0, 0.0),

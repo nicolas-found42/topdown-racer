@@ -5,7 +5,7 @@ Fresh native Rust top-down racing game. Solo developer v1: you versus AI opponen
 ## Language
 
 **Track**:
-A closed-loop circuit defined as a data-driven center polyline plus width and surfaces.
+A closed-loop circuit defined as a data-driven center polyline plus a per-vertex width ramp and surfaces.
 _Avoid_: level, map, course
 
 **Car**:

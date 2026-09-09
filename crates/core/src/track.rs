@@ -5,21 +5,11 @@ use serde::Deserialize;
 /// ticket has something concrete to load.
 pub const SAMPLE_CIRCUIT: &str = include_str!("../data/tracks/sample-circuit.json");
 
-/// A parsed closed circuit: center polyline, width, and one surface per
-/// polyline segment.
+/// A parsed closed circuit: center polyline, per-vertex width ramp, and
+/// one surface per polyline segment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub name: String,
-    /// Full road width in world units.
-    ///
-    /// Conservative floor over `widths`: for a track authored with a
-    /// `widths` array this is the array MINIMUM. The simulation no longer
-    /// reads it — walls, surface sampling, checkpoints, and AI planning
-    /// all consume the local interpolated width — so the field remains
-    /// only for the render-geometry consumer until the contract step
-    /// removes it. Tracks authored with a single global width keep that
-    /// width exactly.
-    pub width: f32,
     /// Per-vertex full road width in world units, one entry per entry of
     /// `points` (`widths.len() == points.len()`); the closing entry
     /// repeats the opening one, mirroring the points loop. Tracks authored
@@ -222,6 +212,9 @@ pub enum TrackParseError {
     WidthsLengthMismatch { points: usize, widths: usize },
     /// A `widths` entry that is zero or negative.
     InvalidVertexWidth { index: usize, value: f32 },
+    /// The track JSON names neither a global `width` nor a per-vertex
+    /// `widths` array, so no road width can be resolved.
+    MissingWidth,
     /// A surface span names a surface that does not exist.
     UnknownSurface {
         found: String,
@@ -281,6 +274,10 @@ impl std::fmt::Display for TrackParseError {
             TrackParseError::InvalidVertexWidth { index, value } => {
                 write!(f, "track widths[{index}] must be positive, got {value}")
             }
+            TrackParseError::MissingWidth => write!(
+                f,
+                "track needs a positive width or a per-vertex widths array"
+            ),
             TrackParseError::UnknownSurface { found, known } => write!(
                 f,
                 "unknown surface '{found}'; known surfaces: {}",
@@ -331,7 +328,6 @@ impl std::error::Error for TrackParseError {}
 #[derive(Deserialize)]
 struct TrackSource {
     name: String,
-    width: f32,
     #[serde(default)]
     widths: Option<Vec<f32>>,
     points: Vec<[f32; 2]>,
@@ -340,6 +336,8 @@ struct TrackSource {
     props: Vec<PropSource>,
     #[serde(default)]
     terrain_zones: Vec<ZoneSource>,
+    #[serde(default)]
+    width: Option<f32>,
     #[serde(default)]
     theme: Option<String>,
     #[serde(default)]
@@ -389,10 +387,6 @@ const MIN_DISTINCT_POINTS: usize = 3;
 impl Track {
     pub fn parse(text: &str) -> Result<Track, TrackParseError> {
         let src: TrackSource = serde_json::from_str(text).map_err(TrackParseError::Malformed)?;
-
-        if !src.width.is_finite() || src.width <= 0.0 {
-            return Err(TrackParseError::InvalidWidth(src.width));
-        }
 
         if src.points.is_empty() {
             return Err(TrackParseError::TooFewPoints(0));
@@ -515,12 +509,11 @@ impl Track {
         let closing = points[0];
         *points.last_mut().unwrap() = closing;
 
-        // Resolve per-vertex widths: an authored `widths` array wins (its
-        // minimum then supersedes the global `width` for legacy consumers);
-        // otherwise the global width broadcasts to a uniform array.
-        let (width, widths) = match src.widths {
-            None => (src.width, vec![src.width; points.len()]),
-            Some(raw) => {
+        // Resolve per-vertex widths: an authored `widths` array wins and a
+        // co-authored global `width` is ignored; otherwise the global width
+        // broadcasts to a uniform ramp. A widths-only file is equally valid.
+        let widths = match (src.widths, src.width) {
+            (Some(mut raw), _) => {
                 if raw.len() != src.points.len() {
                     return Err(TrackParseError::WidthsLengthMismatch {
                         points: src.points.len(),
@@ -535,19 +528,23 @@ impl Track {
                         });
                     }
                 }
-                let mut resolved = raw;
                 // The closing vertex IS the first vertex; canonicalize its
                 // width like the points loop so the invariant holds exactly.
-                let opening = resolved[0];
-                *resolved.last_mut().unwrap() = opening;
-                let min = resolved.iter().copied().fold(f32::INFINITY, f32::min);
-                (min, resolved)
+                let opening = raw[0];
+                *raw.last_mut().unwrap() = opening;
+                raw
             }
+            (None, Some(width)) => {
+                if !width.is_finite() || width <= 0.0 {
+                    return Err(TrackParseError::InvalidWidth(width));
+                }
+                vec![width; points.len()]
+            }
+            (None, None) => return Err(TrackParseError::MissingWidth),
         };
 
         Ok(Track {
             name: src.name,
-            width,
             widths,
             points,
             surfaces,
@@ -636,17 +633,6 @@ impl Track {
         } else {
             self.point_at_arc(self.start_arc() - distance)
         }
-    }
-
-    /// Half of the full road width: distance from the centerline polyline to
-    /// the outer road edge.
-    pub fn road_half_width(&self) -> f32 {
-        self.width * 0.5
-    }
-
-    /// Distance from the centerline polyline to the Track boundary walls.
-    pub fn wall_distance(&self) -> f32 {
-        self.width
     }
 
     /// Half road width at `pose`: the local width, linearly interpolated
@@ -763,7 +749,7 @@ mod tests {
         let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
 
         assert_eq!(track.name, "Sample Circuit");
-        assert_eq!(track.width, 14.0);
+        assert_eq!(track.widths, vec![14.0; track.points.len()]);
 
         // Geometry: closed loop with the first vertex repeated as the last.
         let n = track.points.len();
@@ -859,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn widths_array_resolves_per_vertex_and_width_is_the_minimum() {
+    fn widths_array_wins_over_the_global_width() {
         let text = track_text_widths(
             "[[0,0],[10,0],[10,10],[0,0]]",
             "10",
@@ -869,12 +855,9 @@ mod tests {
         let track = Track::parse(&text).unwrap();
         assert_eq!(track.widths, vec![8.0, 12.0, 16.0, 8.0]);
         assert_eq!(track.widths.len(), track.points.len());
-        // The legacy global width becomes the array minimum so consumers
-        // still reading `width` treat the loop as its narrowest.
-        assert_eq!(track.width, 8.0);
 
-        // Boundary: the closing entry repeats the opening vertex, so it is
-        // canonicalized to the opening width like the points loop.
+        // The global width is a fallback, not a co-field: an authored
+        // widths array is used as-is (no minimum is derived anymore).
         let text = track_text_widths(
             "[[0,0],[10,0],[10,10],[0,0]]",
             "10",
@@ -883,14 +866,36 @@ mod tests {
         );
         let track = Track::parse(&text).unwrap();
         assert_eq!(track.widths, vec![8.0, 12.0, 16.0, 8.0]);
-        assert_eq!(track.width, 8.0);
     }
 
     #[test]
     fn global_width_without_widths_resolves_a_uniform_array() {
         let track = Track::parse(&closed_triangle_text()).unwrap();
-        assert_eq!(track.width, 10.0);
         assert_eq!(track.widths, vec![10.0; track.points.len()]);
+    }
+
+    #[test]
+    fn widths_only_json_loads_without_a_global_width() {
+        let text = r#"{
+            "name": "Widths Only",
+            "widths": [8.0, 12.0, 16.0, 8.0],
+            "points": [[0,0],[10,0],[10,10],[0,0]],
+            "surfaces": []
+        }"#;
+        let track = Track::parse(text).unwrap();
+        assert_eq!(track.widths, vec![8.0, 12.0, 16.0, 8.0]);
+    }
+
+    #[test]
+    fn json_with_neither_width_nor_widths_is_rejected() {
+        let text = r#"{
+            "name": "No Width",
+            "points": [[0,0],[10,0],[10,10],[0,0]],
+            "surfaces": []
+        }"#;
+        let err = Track::parse(text).unwrap_err();
+        assert!(matches!(err, TrackParseError::MissingWidth), "{err:?}");
+        assert!(err.to_string().contains("widths"));
     }
 
     #[test]
@@ -1048,8 +1053,8 @@ mod tests {
     #[test]
     fn surface_sampling_identifies_road_gravel_and_off_track_grass() {
         let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
-        // Road half-width is 7.0 (width is 14.0).
-        assert_eq!(track.road_half_width(), 7.0);
+        // Road half-width is 7.0 (uniform widths 14.0).
+        assert_eq!(track.road_half_width_at(Vec2::new(50.0, 0.0)), 7.0);
 
         // Segment 0 is Road: (0,0) -> (120,0).
         // On centerline:
@@ -1113,8 +1118,8 @@ mod tests {
     #[test]
     fn wall_contact_detects_boundary_penetration_and_inward_normal() {
         let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
-        // Wall distance is 14.0 (equal to track.width).
-        assert_eq!(track.wall_distance(), 14.0);
+        // Wall distance is the local full width (uniform track: 14.0).
+        assert_eq!(track.wall_distance_at(Vec2::new(50.0, 0.0)), 14.0);
 
         // Within wall boundary: no wall contact.
         assert!(track.wall_contact(Vec2::new(50.0, 0.0)).is_none());
