@@ -59,6 +59,23 @@ pub struct CarVisual {
     pub car_index: usize,
 }
 
+/// Component tagging a front-wheel visual so steering can rotate it. The
+/// wheel entity is a child of the Car body; its local rotation is the visual
+/// steer angle.
+#[derive(Component)]
+pub struct FrontWheel {
+    pub car_index: usize,
+}
+
+/// Maximum visual yaw of a front wheel at full steering lock, in radians.
+pub const MAX_FRONT_WHEEL_ANGLE: f32 = 0.5;
+
+/// Maps a steering demand (-1..1, positive left) to a front-wheel visual
+/// angle (counter-clockwise positive, matching Bevy rotation_z).
+pub fn front_wheel_angle(steer: f32) -> f32 {
+    steer.clamp(-1.0, 1.0) * MAX_FRONT_WHEEL_ANGLE
+}
+
 /// Total cars in the race: 1 player car + 3 AI opponents.
 pub const TOTAL_RACE_CARS: usize = 4;
 
@@ -147,6 +164,7 @@ impl Plugin for RacerGamePlugin {
                 (
                     update_letterbox,
                     interpolate_car_and_camera.run_if(in_state(AppState::Race)),
+                    update_front_wheel_steer.run_if(in_state(AppState::Race)),
                     update_hud.run_if(in_state(AppState::Race)),
                     update_countdown_overlay.run_if(in_state(AppState::Race)),
                     update_audio.run_if(in_state(AppState::Race)),
@@ -321,14 +339,25 @@ fn setup_car(
                 CarVisual { car_index: i },
             ))
             .with_children(|car| {
-                // 4 Real Rubber Tires
-                for &(x, y) in &[(1.3, 1.05), (1.3, -1.05), (-1.3, 1.05), (-1.3, -1.05)] {
-                    car.spawn(ColorMesh2dBundle {
+                // 4 Real Rubber Tires; the front axle (x = +1.3) carries a
+                // FrontWheel marker so the steer system can yaw it.
+                for &(x, y, front) in &[
+                    (1.3, 1.05, true),
+                    (1.3, -1.05, true),
+                    (-1.3, 1.05, false),
+                    (-1.3, -1.05, false),
+                ] {
+                    let bundle = ColorMesh2dBundle {
                         mesh: tire_mesh.clone().into(),
                         material: tire_mat.clone(),
                         transform: Transform::from_xyz(x, y, -0.01),
                         ..default()
-                    });
+                    };
+                    if front {
+                        car.spawn((bundle, FrontWheel { car_index: i }));
+                    } else {
+                        car.spawn(bundle);
+                    }
                 }
                 // Main Aerodynamic Chassis Body
                 car.spawn(ColorMesh2dBundle {
@@ -445,6 +474,27 @@ pub fn read_keyboard_input(
 fn step_simulation(mut shell: ResMut<ShellSimulation>, player_input: Res<PlayerInput>) {
     shell.prev_snapshots = shell.curr_snapshots.clone();
     shell.curr_snapshots = shell.sim.tick(&[player_input.0]);
+}
+
+/// Yaws each front-wheel visual to the interpolated steering demand. The
+/// angle lerps between the previous and current snapshots with the same
+/// fixed-step overstep fraction the body interpolation uses, so the wheels
+/// lead the chassis through a turn instead of sitting straight.
+pub(crate) fn update_front_wheel_steer(
+    shell: Res<ShellSimulation>,
+    fixed_time: Res<Time<Fixed>>,
+    mut wheels: Query<(&FrontWheel, &mut Transform)>,
+) {
+    let alpha = fixed_time.overstep_fraction();
+    for (wheel, mut tf) in wheels.iter_mut() {
+        if let (Some(prev), Some(curr)) = (
+            shell.prev_snapshots.get(wheel.car_index),
+            shell.curr_snapshots.get(wheel.car_index),
+        ) {
+            let steer = prev.steer + (curr.steer - prev.steer) * alpha;
+            tf.rotation = Quat::from_rotation_z(front_wheel_angle(steer));
+        }
+    }
 }
 
 /// Toggles player car autopilot with the T key.
@@ -716,5 +766,54 @@ mod tests {
             shell.sim.ai_enabled(0),
             "an enabled autopilot toggle must survive a race reset"
         );
+    }
+
+    #[test]
+    fn front_wheel_angle_tracks_steer_demand() {
+        assert_eq!(front_wheel_angle(0.0), 0.0);
+        assert_eq!(front_wheel_angle(1.0), MAX_FRONT_WHEEL_ANGLE);
+        assert_eq!(front_wheel_angle(-1.0), -MAX_FRONT_WHEEL_ANGLE);
+        // Out-of-range demands clamp to full lock rather than over-rotating.
+        assert_eq!(front_wheel_angle(2.0), MAX_FRONT_WHEEL_ANGLE);
+        assert_eq!(front_wheel_angle(-2.0), -MAX_FRONT_WHEEL_ANGLE);
+    }
+
+    /// The full render path: the real car scene plus the real steer system
+    /// must yaw both front wheels per car to the snapshot steer angle. A
+    /// missed marker or missing system registration fails here, not on screen.
+    #[test]
+    fn front_wheels_yaw_with_snapshot_steer() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut shell = ShellSimulation::new(track);
+        for snapshots in [&mut shell.prev_snapshots, &mut shell.curr_snapshots] {
+            for (k, snap) in snapshots.iter_mut().enumerate() {
+                snap.steer = if k == 0 { 1.0 } else { -1.0 };
+            }
+        }
+        let mut app = App::new();
+        app.insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64));
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<ColorMaterial>>();
+        app.insert_resource(shell);
+        app.add_systems(Startup, setup_car);
+        app.add_systems(Update, update_front_wheel_steer);
+        app.update();
+
+        let mut wheels = app.world_mut().query::<(&FrontWheel, &Transform)>();
+        let world = app.world();
+        assert_eq!(wheels.iter(world).len(), 2 * TOTAL_RACE_CARS,);
+        for (wheel, tf) in wheels.iter(world) {
+            let angle = 2.0 * tf.rotation.z.atan2(tf.rotation.w);
+            let expected = if wheel.car_index == 0 {
+                MAX_FRONT_WHEEL_ANGLE
+            } else {
+                -MAX_FRONT_WHEEL_ANGLE
+            };
+            assert!(
+                (angle - expected).abs() < 1e-4,
+                "car {} wheel must yaw to {expected}, got {angle}",
+                wheel.car_index,
+            );
+        }
     }
 }

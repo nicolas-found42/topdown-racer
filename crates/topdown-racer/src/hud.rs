@@ -270,6 +270,7 @@ pub(crate) fn sample_snapshot() -> CarSnapshot {
         heading: 0.0,
         velocity: Vec2::ZERO,
         forward_speed: 0.0,
+        steer: 0.0,
         surface: Surface::Road,
         wall_contact: false,
         drifting: false,

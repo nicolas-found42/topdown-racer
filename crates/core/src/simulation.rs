@@ -66,6 +66,9 @@ pub struct CarSnapshot {
     pub velocity: Vec2,
     /// Signed speed along the Car's heading; negative while reversing.
     pub forward_speed: f32,
+    /// Steering demand applied on this tick, -1..1. Positive is left
+    /// (counter-clockwise); drives the front-wheel visual angle.
+    pub steer: f32,
     /// Surface the Car is currently driving on.
     pub surface: Surface,
     /// Whether the Car contacted a boundary wall during this tick.
@@ -100,6 +103,7 @@ struct CarState {
     pose: Vec2,
     heading: f32,
     velocity: Vec2,
+    steer: f32,
     reverse: bool,
     standstill_ticks: u32,
     completed_laps: u32,
@@ -144,6 +148,7 @@ impl Sim {
                     pose,
                     heading,
                     velocity: Vec2::ZERO,
+                    steer: 0.0,
                     reverse: false,
                     standstill_ticks: 0,
                     completed_laps: 0,
@@ -259,6 +264,7 @@ impl Sim {
                 inputs.get(i).copied().unwrap_or_default()
             };
 
+            car.steer = effective_input.steer;
             let (surface, wall_contact, drifting) = step_car(car, effective_input, &self.track);
             step_results.push((surface, wall_contact, drifting));
 
@@ -268,7 +274,7 @@ impl Sim {
             }
         }
 
-        // Car-to-Car collisions: pairwise sphere collision response
+        // Car-to-Car collisions: pairwise oriented-box collision response
         resolve_car_collisions(&mut self.cars);
 
         // If any car completed all laps, the race transitions to Finished
@@ -327,6 +333,7 @@ impl Sim {
             heading: car.heading,
             velocity: car.velocity,
             forward_speed: car.velocity.dot(forward(car.heading)),
+            steer: car.steer,
             surface,
             wall_contact,
             drifting,
@@ -621,22 +628,29 @@ const DRIFT_SPEED_MIN: f32 = 3.0;
 pub const DRIFT_LATERAL_SLIP_MIN: f32 = 1.2;
 /// Minimum lateral slip speed under handbrake to enter the Drift state.
 const HANDBRAKE_DRIFT_SLIP_MIN: f32 = 0.4;
-/// Bounding circle radius for car-to-car collision resolution.
-pub const CAR_COLLISION_RADIUS: f32 = 1.6;
+/// Half length of the Car's collision box in world units, covering the nose
+/// (x = 2.1) through the rear wing (x = -2.2).
+pub const CAR_HALF_LENGTH: f32 = 2.2;
+/// Half width of the Car's collision box in world units, covering the outer
+/// tire edges (|y| = 1.29).
+pub const CAR_HALF_WIDTH: f32 = 1.3;
 /// Coefficient of restitution for car-to-car collisions.
 pub const CAR_COLLISION_RESTITUTION: f32 = 0.5;
 
-/// Resolves pairwise circle collisions between all cars with separation and elastic impulse.
+/// Resolves pairwise oriented-box collisions between all cars with separation
+/// and elastic impulse (SAT on the two heading frames).
+///
+/// The old bounding circle (radius 1.6, diameter 3.2) was shorter than the
+/// visual Car (~4.3 nose to tail), so bumper-to-bumper cars overlapped by a
+/// full unit before the resolver engaged. The box matches the rendered
+/// chassis, nose, wing, and tire extents.
 fn resolve_car_collisions(cars: &mut [CarState]) {
     let num_cars = cars.len();
     for i in 0..num_cars {
         for j in (i + 1)..num_cars {
-            let delta = cars[j].pose - cars[i].pose;
-            let dist = delta.length();
-            let min_dist = CAR_COLLISION_RADIUS * 2.0;
-            if dist < min_dist && dist > 0.0001 {
-                let normal = delta / dist;
-                let penetration = min_dist - dist;
+            if let Some((normal, penetration)) =
+                obb_penetration(cars[i].pose, cars[i].heading, cars[j].pose, cars[j].heading)
+            {
                 cars[i].pose -= normal * (penetration * 0.5);
                 cars[j].pose += normal * (penetration * 0.5);
 
@@ -650,6 +664,41 @@ fn resolve_car_collisions(cars: &mut [CarState]) {
             }
         }
     }
+}
+
+/// SAT overlap of two Car boxes. Returns the minimum-penetration world-space
+/// normal (pointing from `pose_a` toward `pose_b`) and penetration depth, or
+/// `None` when separated on any of the four box axes.
+fn obb_penetration(
+    pose_a: Vec2,
+    heading_a: f32,
+    pose_b: Vec2,
+    heading_b: f32,
+) -> Option<(Vec2, f32)> {
+    let fwd_a = forward(heading_a);
+    let left_a = Vec2::new(-fwd_a.y, fwd_a.x);
+    let fwd_b = forward(heading_b);
+    let left_b = Vec2::new(-fwd_b.y, fwd_b.x);
+    let delta = pose_b - pose_a;
+    let axes = [fwd_a, left_a, fwd_b, left_b];
+    let mut best: Option<(Vec2, f32)> = None;
+    for axis in axes {
+        let extent_a =
+            CAR_HALF_LENGTH * fwd_a.dot(axis).abs() + CAR_HALF_WIDTH * left_a.dot(axis).abs();
+        let extent_b =
+            CAR_HALF_LENGTH * fwd_b.dot(axis).abs() + CAR_HALF_WIDTH * left_b.dot(axis).abs();
+        let dist = delta.dot(axis).abs();
+        let overlap = extent_a + extent_b - dist;
+        if overlap <= 0.0 {
+            return None;
+        }
+        let sign = if delta.dot(axis) < 0.0 { -1.0 } else { 1.0 };
+        let normal = axis * sign;
+        if best.is_none_or(|(_, depth)| overlap < depth) {
+            best = Some((normal, overlap));
+        }
+    }
+    best
 }
 
 /// Wraps an angle delta to the range $[-\pi, \pi]$ taking the shortest rotational path.
@@ -1809,5 +1858,105 @@ mod tests {
             snap_wall.velocity.y > 0.0,
             "AI car normal velocity must reflect off wall"
         );
+    }
+
+    #[test]
+    fn bumper_to_bumper_cars_separate_to_full_visual_length() {
+        // Regression: the old bounding circle (diameter 3.2) never even fired
+        // at this gap, yet the visual cars (~4.3 nose to tail) already
+        // overlapped. The oriented box must hold the full
+        // 2 * CAR_HALF_LENGTH nose-to-tail gap.
+        let mut sim = Sim::new(straight_track(), 2);
+        for (k, x) in [100.0, 103.5].iter().enumerate() {
+            sim.cars[k].pose = Vec2::new(*x, 0.0);
+            sim.cars[k].heading = 0.0;
+            sim.cars[k].velocity = Vec2::ZERO;
+        }
+        sim.tick(&[CarInput::default(), CarInput::default()]);
+        let dist = (sim.cars[1].pose - sim.cars[0].pose).length();
+        assert!(
+            dist >= 2.0 * CAR_HALF_LENGTH - 1e-3,
+            "nose-to-tail cars must rest {} apart, got {dist}",
+            2.0 * CAR_HALF_LENGTH,
+        );
+    }
+
+    #[test]
+    fn side_by_side_cars_separate_to_full_visual_width() {
+        // Same overlap class across the lateral axis: door-to-door cars must
+        // hold 2 * CAR_HALF_WIDTH (outer tire edge to outer tire edge).
+        let mut sim = Sim::new(straight_track(), 2);
+        sim.cars[0].pose = Vec2::new(100.0, 0.0);
+        sim.cars[0].heading = 0.0;
+        sim.cars[0].velocity = Vec2::ZERO;
+        sim.cars[1].pose = Vec2::new(100.0, 1.5);
+        sim.cars[1].heading = 0.0;
+        sim.cars[1].velocity = Vec2::ZERO;
+        sim.tick(&[CarInput::default(), CarInput::default()]);
+        let lateral = (sim.cars[1].pose.y - sim.cars[0].pose.y).abs();
+        assert!(
+            lateral >= 2.0 * CAR_HALF_WIDTH - 1e-3,
+            "side-by-side cars must rest {} apart, got {lateral}",
+            2.0 * CAR_HALF_WIDTH,
+        );
+    }
+
+    #[test]
+    fn clear_side_by_side_cars_are_not_pushed_apart() {
+        // Mirror regression: at 2.8 laterally the boxes (2.6 wide together)
+        // are clear, so the resolver must leave them alone. The old circle
+        // (diameter 3.2) wrongly shoved them apart here.
+        let mut sim = Sim::new(straight_track(), 2);
+        sim.cars[0].pose = Vec2::new(100.0, 0.0);
+        sim.cars[0].heading = 0.0;
+        sim.cars[0].velocity = Vec2::ZERO;
+        sim.cars[1].pose = Vec2::new(100.0, 2.8);
+        sim.cars[1].heading = 0.0;
+        sim.cars[1].velocity = Vec2::ZERO;
+        sim.tick(&[CarInput::default(), CarInput::default()]);
+        let lateral = (sim.cars[1].pose.y - sim.cars[0].pose.y).abs();
+        assert!(
+            (lateral - 2.8).abs() < 1e-3,
+            "clear cars must keep their gap, got {lateral}",
+        );
+    }
+
+    #[test]
+    fn perpendicular_cars_separate_without_overlap() {
+        // A T-bone overlap must resolve on the minimum-penetration axis so no
+        // corner of either box stays inside the other.
+        let mut sim = Sim::new(straight_track(), 2);
+        sim.cars[0].pose = Vec2::new(100.0, 0.0);
+        sim.cars[0].heading = 0.0;
+        sim.cars[0].velocity = Vec2::ZERO;
+        sim.cars[1].pose = Vec2::new(101.0, 0.5);
+        sim.cars[1].heading = std::f32::consts::FRAC_PI_2;
+        sim.cars[1].velocity = Vec2::ZERO;
+        sim.tick(&[CarInput::default(), CarInput::default()]);
+        assert!(
+            obb_penetration(
+                sim.cars[0].pose,
+                sim.cars[0].heading,
+                sim.cars[1].pose,
+                sim.cars[1].heading,
+            )
+            .is_none(),
+            "perpendicular cars must be separated after resolution, got {:?} / {:?}",
+            sim.cars[0].pose,
+            sim.cars[1].pose,
+        );
+    }
+
+    #[test]
+    fn snapshot_carries_applied_steer_for_wheel_visuals() {
+        // The shell renders front-wheel yaw from the snapshot, so the tick
+        // must publish the applied steer and the no-tick projection must keep it.
+        let mut sim = Sim::new(straight_track(), 1);
+        sim.cars[0].velocity = Vec2::new(10.0, 0.0);
+        let snaps = sim.tick(&[hold(0.5, 0.0, 1.0)]);
+        assert_eq!(snaps[0].steer, 1.0);
+        let snaps = sim.tick(&[hold(0.5, 0.0, -0.5)]);
+        assert_eq!(snaps[0].steer, -0.5);
+        assert_eq!(sim.snapshots()[0].steer, -0.5);
     }
 }
