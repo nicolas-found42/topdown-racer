@@ -12,6 +12,7 @@ pub mod palette;
 mod race;
 mod results;
 mod track_geometry;
+pub mod world_bake;
 
 pub use audio::{
     create_pcm_wav, engine_pitch_from_speed, generate_engine_loop_wav, generate_skid_loop_wav,
@@ -35,6 +36,8 @@ pub use race::{
     reset_race_on_enter, results_action_system, AppState, RaceLifecyclePlugin,
 };
 pub use results::{format_results, should_show_results, spawn_results_ui, ResultRow, ResultsUi};
+pub use track_geometry::{build_track_geometry, Quad, RoadQuad, TrackRenderGeometry, ZoneQuad};
+pub use world_bake::{bake_world, WorldCanvas, TEXELS_PER_UNIT};
 
 use bevy::prelude::*;
 use glam::Vec2;
@@ -337,9 +340,6 @@ const LIVERY_TEXTURES: [&str; TOTAL_RACE_CARS] = [
 
 /// Front-wheel sprite shared by every car.
 const WHEEL_TEXTURE: &str = "sprites/car/wheel.png";
-
-/// Native sprite density: 8 texels per world unit.
-const TEXELS_PER_UNIT: f32 = 8.0;
 
 fn setup_car(mut commands: Commands, asset_server: Res<AssetServer>, sim: Res<ShellSimulation>) {
     let wheel_texture: Handle<Image> = asset_server.load(WHEEL_TEXTURE);
