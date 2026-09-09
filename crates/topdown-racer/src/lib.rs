@@ -44,7 +44,7 @@ use glam::Vec2;
 use topdown_racer_core::{
     ai::AiDriver,
     simulation::{CarInput, CarSnapshot, Sim, FIXED_HZ},
-    track::{PropKind, Surface, Track, ZoneKind, SAMPLE_CIRCUIT},
+    track::{PropKind, Track, SAMPLE_CIRCUIT},
 };
 
 use audio::setup_audio;
@@ -54,8 +54,19 @@ use hud::{hide_hud, setup_hud, show_hud, update_countdown_overlay, update_hud};
 /// Canonical aspect ratio for the game view (16:9).
 pub const TARGET_ASPECT_RATIO: f32 = 16.0 / 9.0;
 
-/// Fixed camera zoom (orthographic scale). Smaller value = closer zoom.
-pub const CAMERA_ZOOM: f32 = 0.05;
+/// Fixed camera view in world units, independent of window size.
+pub const CAMERA_VIEW_SIZE: Vec2 = Vec2::new(80.0, 45.0);
+
+/// World z-stack. Skid decals lie on the bake; scenery and Cars sit above
+/// them, with airborne driving FX above the Cars. Car children use local
+/// offsets below 0.1; grid slots reserve another 0.1 each.
+pub mod world_z {
+    pub const BAKE: f32 = 0.0;
+    pub const SKID: f32 = 1.0;
+    pub const SCENERY: f32 = 2.0;
+    pub const CAR: f32 = 3.0;
+    pub const FX: f32 = 4.0;
+}
 
 /// Component tagging a rendered Car Sprite and identifying its car index.
 #[derive(Component)]
@@ -126,7 +137,8 @@ impl Plugin for RacerGamePlugin {
         let track = Track::parse(SAMPLE_CIRCUIT).expect("sample circuit must parse");
         let auto_start = std::env::var("TOPDOWN_AUTO_START").as_deref() == Ok("1");
         let capture_frames = std::env::var("TOPDOWN_CAPTURE").as_deref() == Ok("1");
-        app.add_plugins(RaceLifecyclePlugin)
+        app.insert_resource(Msaa::Off)
+            .add_plugins(RaceLifecyclePlugin)
             .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
             .insert_resource(ShellSimulation::new(track))
             .insert_resource(SavedBestLap(load_best_lap(&default_best_lap_path())))
@@ -185,89 +197,43 @@ impl Plugin for RacerGamePlugin {
 
 fn setup_track(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     assets: Res<AssetServer>,
     sim: Res<ShellSimulation>,
 ) {
-    let track = sim.sim.track();
+    use bevy::render::{
+        render_asset::RenderAssetUsages,
+        render_resource::{Extent3d, TextureDimension, TextureFormat},
+        texture::ImageSampler,
+    };
 
-    // Background grass field behind the track
-    let grass_mesh = meshes.add(Rectangle::new(2400.0, 1600.0));
-    let grass_mat = materials.add(Color::srgb(0.12, 0.36, 0.14));
-    commands.spawn(ColorMesh2dBundle {
-        mesh: grass_mesh.into(),
-        material: grass_mat,
-        transform: Transform::from_xyz(80.0, 60.0, 0.0),
+    let track = sim.sim.track();
+    let canvas = bake_world(&build_track_geometry(track), track.theme);
+    let size = Vec2::new(canvas.width as f32, canvas.height as f32) / TEXELS_PER_UNIT;
+    let center = canvas.world_origin() + size * 0.5;
+    let mut image = Image::new(
+        Extent3d {
+            width: canvas.width,
+            height: canvas.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        canvas.pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::nearest();
+    commands.spawn(SpriteBundle {
+        texture: images.add(image),
+        sprite: Sprite {
+            custom_size: Some(size),
+            ..default()
+        },
+        transform: Transform::from_xyz(center.x, center.y, world_z::BAKE),
         ..default()
     });
 
-    let road_mat = materials.add(Color::srgb(0.20, 0.20, 0.24));
-    let gravel_mat = materials.add(Color::srgb(0.55, 0.44, 0.28));
-    let white_mat = materials.add(Color::srgb(0.95, 0.95, 0.95));
-    let black_mat = materials.add(Color::srgb(0.10, 0.10, 0.12));
-    let kerb_red = materials.add(Color::srgb(0.85, 0.18, 0.18));
-    let kerb_white = materials.add(Color::srgb(0.95, 0.95, 0.95));
-    let guardrail_mat = materials.add(Color::srgb(0.72, 0.75, 0.80));
-    let sand_mat = materials.add(palette::color(palette::DRY_GOLD));
-    let dirt_mat = materials.add(palette::color(palette::DIRT_BASE));
-    let dark_grass_mat = materials.add(palette::color(palette::GRASS_SHADOW));
-
-    // All quad math comes from the pure geometry seam; this system only
-    // chooses materials and z-ordering.
-    let geo = track_geometry::build_track_geometry(track);
-
-    for road_quad in &geo.road {
-        let mat = match road_quad.surface {
-            Surface::Road => road_mat.clone(),
-            Surface::Gravel => gravel_mat.clone(),
-            Surface::Grass => continue,
-        };
-        spawn_quad(&mut commands, &mut meshes, road_quad.quad, mat, 1.0);
-    }
-    for quad in &geo.edge_lines {
-        spawn_quad(&mut commands, &mut meshes, *quad, white_mat.clone(), 1.2);
-    }
-    for quad in &geo.dashes {
-        spawn_quad(&mut commands, &mut meshes, *quad, white_mat.clone(), 1.1);
-    }
-    for (i, quad) in geo.kerbs.iter().enumerate() {
-        let mat = if i % 2 == 0 {
-            kerb_red.clone()
-        } else {
-            kerb_white.clone()
-        };
-        spawn_quad(&mut commands, &mut meshes, *quad, mat, 1.3);
-    }
-    for quad in &geo.guardrails {
-        spawn_quad(
-            &mut commands,
-            &mut meshes,
-            *quad,
-            guardrail_mat.clone(),
-            2.0,
-        );
-    }
-    for (i, quad) in geo.start_line.iter().enumerate() {
-        let mat = if (i / 10 + i % 10) % 2 == 0 {
-            white_mat.clone()
-        } else {
-            black_mat.clone()
-        };
-        spawn_quad(&mut commands, &mut meshes, *quad, mat, 1.4);
-    }
-    for zone_quad in &geo.zones {
-        let mat = match zone_quad.kind {
-            ZoneKind::Sand => sand_mat.clone(),
-            ZoneKind::Dirt => dirt_mat.clone(),
-            ZoneKind::DarkGrass => dark_grass_mat.clone(),
-        };
-        spawn_quad(&mut commands, &mut meshes, zone_quad.quad, mat, 0.5);
-    }
-    // Scenery reads track.props directly: one sprite entity per authored
-    // prop, rotated to its facing. custom_size is native texels / 8.0 so
-    // art renders at native density (8 texels per world unit); z 3.0 sits
-    // above guardrails, as the placeholders did.
+    // Scenery reads Track placement and renders at native sprite density.
     for prop in &track.props {
         let (path, size) = match prop.kind {
             PropKind::Tree => ("sprites/scenery/tree.png", Vec2::new(3.0, 4.0)),
@@ -276,7 +242,7 @@ fn setup_track(
         };
         commands.spawn(SpriteBundle {
             texture: assets.load(path),
-            transform: Transform::from_xyz(prop.position.x, prop.position.y, 3.0)
+            transform: Transform::from_xyz(prop.position.x, prop.position.y, world_z::SCENERY)
                 .with_rotation(Quat::from_rotation_z(prop.rotation)),
             sprite: Sprite {
                 custom_size: Some(size),
@@ -285,49 +251,6 @@ fn setup_track(
             ..default()
         });
     }
-}
-
-/// Spawns one quad as a colored 2D mesh at the given z height.
-fn spawn_quad(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    quad: track_geometry::Quad,
-    material: Handle<ColorMaterial>,
-    z: f32,
-) {
-    commands.spawn(ColorMesh2dBundle {
-        mesh: meshes
-            .add(create_quad_mesh(
-                quad.verts[0],
-                quad.verts[1],
-                quad.verts[2],
-                quad.verts[3],
-            ))
-            .into(),
-        material,
-        transform: Transform::from_xyz(0.0, 0.0, z),
-        ..default()
-    });
-}
-
-fn create_quad_mesh(tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2) -> Mesh {
-    use bevy::render::mesh::{Indices, PrimitiveTopology};
-    let positions = vec![
-        [tl.x, tl.y, 0.0],
-        [tr.x, tr.y, 0.0],
-        [br.x, br.y, 0.0],
-        [bl.x, bl.y, 0.0],
-    ];
-    let normals = vec![[0.0, 0.0, 1.0]; 4];
-    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-    let indices = Indices::U32(vec![0, 1, 2, 0, 2, 3]);
-
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, default());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(indices);
-    mesh
 }
 
 /// Livery textures, one Car Sprite per grid slot; slot 0 is the player car.
@@ -350,8 +273,12 @@ fn setup_car(mut commands: Commands, asset_server: Res<AssetServer>, sim: Res<Sh
         commands
             .spawn((
                 SpatialBundle {
-                    transform: Transform::from_xyz(snap.pose.x, snap.pose.y, 10.0 + i as f32 * 0.1)
-                        .with_rotation(Quat::from_rotation_z(snap.heading)),
+                    transform: Transform::from_xyz(
+                        snap.pose.x,
+                        snap.pose.y,
+                        world_z::CAR + i as f32 * 0.1,
+                    )
+                    .with_rotation(Quat::from_rotation_z(snap.heading)),
                     ..default()
                 },
                 CarSprite { car_index: i },
@@ -793,5 +720,106 @@ mod tests {
                 wheel.car_index,
             );
         }
+    }
+
+    /// Issue #42: the shell renders the baked world canvas as a single
+    /// textured quad. `setup_track` must spawn exactly one bake Sprite
+    /// (nearest sampling, canvas-sized, at `world_z::BAKE`), zero flat
+    /// color-mesh quads, scenery above the bake, and a strictly ordered
+    /// z-stack with room for the skid/FX layers that follow.
+    #[test]
+    fn setup_track_renders_the_baked_canvas_as_one_quad() {
+        use bevy::render::texture::{ImageFilterMode, ImageSampler};
+
+        assert!(world_z::BAKE < world_z::SKID);
+        assert!(world_z::SKID < world_z::SCENERY);
+        assert!(world_z::SCENERY < world_z::CAR);
+        assert!(world_z::CAR < world_z::FX);
+
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let canvas = bake_world(&build_track_geometry(&track), track.theme);
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::default());
+        app.init_asset::<Image>();
+        app.insert_resource(ShellSimulation::new(track));
+        app.add_systems(Startup, setup_track);
+        bevy::tasks::IoTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        app.update();
+
+        let mut meshes = app.world_mut().query::<&Handle<Mesh>>();
+        let world = app.world();
+        // The flat quad renderer is gone: no mesh entities survive setup.
+        assert_eq!(
+            meshes.iter(world).len(),
+            0,
+            "flat quad path must be removed"
+        );
+
+        // One baked canvas quad (the sample circuit ships no scenery).
+        let mut sprites = app
+            .world_mut()
+            .query::<(&Handle<Image>, &Sprite, &Transform)>();
+        let world = app.world();
+        let baked: Vec<(&Handle<Image>, &Sprite, &Transform)> = sprites.iter(world).collect();
+        assert_eq!(baked.len(), 1, "want exactly the bake quad");
+        let (handle, sprite, transform) = baked[0];
+        assert_eq!(transform.translation.z, world_z::BAKE, "bake below scenery");
+        let size = Vec2::new(canvas.width as f32, canvas.height as f32) / TEXELS_PER_UNIT;
+        assert_eq!(sprite.custom_size, Some(size), "bake spans the canvas");
+        let center = canvas.world_origin() + size * 0.5;
+        assert_eq!(transform.translation.x, center.x);
+        assert_eq!(transform.translation.y, center.y);
+        let images = world.resource::<Assets<Image>>();
+        let image = images.get(handle).expect("bake texture uploaded");
+        assert_eq!(image.width(), canvas.width);
+        assert_eq!(image.height(), canvas.height);
+        let ImageSampler::Descriptor(desc) = &image.sampler else {
+            panic!("bake texture must pin its sampler, got {:?}", image.sampler);
+        };
+        assert!(
+            matches!(desc.mag_filter, ImageFilterMode::Nearest),
+            "crisp texels, no linear smear"
+        );
+        assert!(matches!(desc.min_filter, ImageFilterMode::Nearest));
+    }
+
+    /// Scenery mounts above the bake so the FX layers have a defined place.
+    #[test]
+    fn setup_track_mounts_scenery_above_the_bake() {
+        let track = Track::parse(
+            r#"{"name":"Props","width":12,
+                "points":[[0,0],[100,0],[100,60],[0,60],[0,0]],"surfaces":[],
+                "props":[{"type":"tree","position":[50,40]}]}"#,
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::default());
+        app.init_asset::<Image>();
+        app.insert_resource(ShellSimulation::new(track));
+        app.add_systems(Startup, setup_track);
+        bevy::tasks::IoTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        app.update();
+
+        let mut sprites = app.world_mut().query::<(&Sprite, &Transform)>();
+        let world = app.world();
+        let mut bake = 0u32;
+        let mut scenery = 0u32;
+        for (sprite, transform) in sprites.iter(world) {
+            if transform.translation.z == world_z::BAKE {
+                bake += 1;
+            } else if transform.translation.z == world_z::SCENERY {
+                assert_eq!(
+                    sprite.custom_size,
+                    Some(Vec2::new(3.0, 4.0)),
+                    "tree at native sprite density"
+                );
+                scenery += 1;
+            } else {
+                panic!("unexpected z {}", transform.translation.z);
+            }
+        }
+        assert_eq!((bake, scenery), (1, 1), "one bake quad, one tree");
     }
 }
