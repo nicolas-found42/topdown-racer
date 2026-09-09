@@ -184,6 +184,7 @@ fn setup_track(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    assets: Res<AssetServer>,
     sim: Res<ShellSimulation>,
 ) {
     let track = sim.sim.track();
@@ -208,9 +209,6 @@ fn setup_track(
     let sand_mat = materials.add(palette::color(palette::DRY_GOLD));
     let dirt_mat = materials.add(palette::color(palette::DIRT_BASE));
     let dark_grass_mat = materials.add(palette::color(palette::GRASS_SHADOW));
-    let tree_mat = materials.add(palette::color(palette::FOLIAGE_BASE));
-    let tire_stack_mat = materials.add(palette::color(palette::ASPHALT_DARKEST));
-    let brake_board_mat = materials.add(palette::color(palette::KERB_BASE));
 
     // All quad math comes from the pure geometry seam; this system only
     // chooses materials and z-ordering.
@@ -263,13 +261,26 @@ fn setup_track(
         };
         spawn_quad(&mut commands, &mut meshes, zone_quad.quad, mat, 0.5);
     }
-    for prop_quad in &geo.props {
-        let mat = match prop_quad.kind {
-            PropKind::Tree => tree_mat.clone(),
-            PropKind::TireStack => tire_stack_mat.clone(),
-            PropKind::BrakeBoard => brake_board_mat.clone(),
+    // Scenery reads track.props directly: one sprite entity per authored
+    // prop, rotated to its facing. custom_size is native texels / 8.0 so
+    // art renders at native density (8 texels per world unit); z 3.0 sits
+    // above guardrails, as the placeholders did.
+    for prop in &track.props {
+        let (path, size) = match prop.kind {
+            PropKind::Tree => ("sprites/scenery/tree.png", Vec2::new(3.0, 4.0)),
+            PropKind::TireStack => ("sprites/scenery/tire_stack.png", Vec2::new(2.0, 2.0)),
+            PropKind::BrakeBoard => ("sprites/scenery/brake_board.png", Vec2::new(1.5, 2.0)),
         };
-        spawn_quad(&mut commands, &mut meshes, prop_quad.quad, mat, 3.0);
+        commands.spawn(SpriteBundle {
+            texture: assets.load(path),
+            transform: Transform::from_xyz(prop.position.x, prop.position.y, 3.0)
+                .with_rotation(Quat::from_rotation_z(prop.rotation)),
+            sprite: Sprite {
+                custom_size: Some(size),
+                ..default()
+            },
+            ..default()
+        });
     }
 }
 
@@ -316,41 +327,25 @@ fn create_quad_mesh(tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2) -> Mesh {
     mesh
 }
 
-fn setup_car(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    sim: Res<ShellSimulation>,
-) {
-    let colors = [
-        Color::srgb(0.88, 0.12, 0.12), // Player: Formula Red
-        Color::srgb(0.12, 0.42, 0.88), // AI 1: Cobalt Blue
-        Color::srgb(0.92, 0.78, 0.12), // AI 2: Solar Yellow
-        Color::srgb(0.12, 0.78, 0.35), // AI 3: Emerald Green
-    ];
+/// Livery textures, one Car Sprite per grid slot; slot 0 is the player car.
+const LIVERY_TEXTURES: [&str; TOTAL_RACE_CARS] = [
+    "sprites/car/body_blue.png",
+    "sprites/car/body_white.png",
+    "sprites/car/body_orange.png",
+    "sprites/car/body_plum.png",
+];
 
-    let tire_mesh = meshes.add(Rectangle::new(1.0, 0.48));
-    let tire_mat = materials.add(Color::srgb(0.06, 0.06, 0.06));
+/// Front-wheel sprite shared by every car.
+const WHEEL_TEXTURE: &str = "sprites/car/wheel.png";
 
-    let chassis_mesh = meshes.add(Rectangle::new(4.2, 2.0));
-    let nose_mesh = meshes.add(Rectangle::new(1.2, 1.6));
-    let cockpit_mesh = meshes.add(Rectangle::new(1.8, 1.4));
-    let cockpit_mat = materials.add(Color::srgb(0.08, 0.12, 0.18));
+/// Native sprite density: 8 texels per world unit.
+const TEXELS_PER_UNIT: f32 = 8.0;
 
-    let stripe_mesh = meshes.add(Rectangle::new(4.2, 0.35));
-    let white_mat = materials.add(Color::srgb(0.95, 0.95, 0.95));
-
-    let wing_mesh = meshes.add(Rectangle::new(0.4, 2.3));
-    let carbon_mat = materials.add(Color::srgb(0.12, 0.12, 0.14));
-
-    let headlight_mesh = meshes.add(Rectangle::new(0.3, 0.4));
-    let headlight_mat = materials.add(Color::srgb(1.0, 0.96, 0.65));
-
-    let taillight_mesh = meshes.add(Rectangle::new(0.2, 0.4));
-    let taillight_mat = materials.add(Color::srgb(1.0, 0.15, 0.15));
-
+fn setup_car(mut commands: Commands, asset_server: Res<AssetServer>, sim: Res<ShellSimulation>) {
+    let wheel_texture: Handle<Image> = asset_server.load(WHEEL_TEXTURE);
     for (i, snap) in sim.curr_snapshots.iter().enumerate() {
-        let body_mat = materials.add(colors[i % colors.len()]);
+        let body_texture: Handle<Image> =
+            asset_server.load(LIVERY_TEXTURES[i % LIVERY_TEXTURES.len()]);
 
         commands
             .spawn((
@@ -362,80 +357,36 @@ fn setup_car(
                 CarSprite { car_index: i },
             ))
             .with_children(|car| {
-                // 4 Real Rubber Tires; the front axle (x = +1.3) carries a
-                // FrontWheel marker so the steer system can yaw it.
-                for &(x, y, front) in &[
-                    (1.3, 1.05, true),
-                    (1.3, -1.05, true),
-                    (-1.3, 1.05, false),
-                    (-1.3, -1.05, false),
-                ] {
-                    let bundle = ColorMesh2dBundle {
-                        mesh: tire_mesh.clone().into(),
-                        material: tire_mat.clone(),
-                        transform: Transform::from_xyz(x, y, -0.01),
+                // Body Car Sprite, authored at native density (4.2 x 2.0
+                // world units); rear wheels and wing are baked into the art.
+                car.spawn(SpriteBundle {
+                    texture: body_texture.clone(),
+                    sprite: Sprite {
+                        custom_size: Some(Vec2::new(4.2, 2.0)),
                         ..default()
-                    };
-                    if front {
-                        car.spawn((bundle, FrontWheel { car_index: i }));
-                    } else {
-                        car.spawn(bundle);
-                    }
-                }
-                // Main Aerodynamic Chassis Body
-                car.spawn(ColorMesh2dBundle {
-                    mesh: chassis_mesh.clone().into(),
-                    material: body_mat.clone(),
+                    },
                     transform: Transform::from_xyz(0.0, 0.0, 0.02),
                     ..default()
                 });
-                // Contoured Front Nose
-                car.spawn(ColorMesh2dBundle {
-                    mesh: nose_mesh.clone().into(),
-                    material: body_mat.clone(),
-                    transform: Transform::from_xyz(1.5, 0.0, 0.03),
-                    ..default()
-                });
-                // Cockpit Glass
-                car.spawn(ColorMesh2dBundle {
-                    mesh: cockpit_mesh.clone().into(),
-                    material: cockpit_mat.clone(),
-                    transform: Transform::from_xyz(0.1, 0.0, 0.04),
-                    ..default()
-                });
-                // White Racing Stripe on Player Car
-                if i == 0 {
-                    car.spawn(ColorMesh2dBundle {
-                        mesh: stripe_mesh.clone().into(),
-                        material: white_mat.clone(),
-                        transform: Transform::from_xyz(0.0, 0.0, 0.05),
-                        ..default()
-                    });
-                }
-                // Rear Spoiler / Wing
-                car.spawn(ColorMesh2dBundle {
-                    mesh: wing_mesh.clone().into(),
-                    material: carbon_mat.clone(),
-                    transform: Transform::from_xyz(-2.0, 0.0, 0.06),
-                    ..default()
-                });
-                // Twin Headlights
-                for &y in &[0.65, -0.65] {
-                    car.spawn(ColorMesh2dBundle {
-                        mesh: headlight_mesh.clone().into(),
-                        material: headlight_mat.clone(),
-                        transform: Transform::from_xyz(2.0, y, 0.05),
-                        ..default()
-                    });
-                }
-                // Twin Taillights
-                for &y in &[0.65, -0.65] {
-                    car.spawn(ColorMesh2dBundle {
-                        mesh: taillight_mesh.clone().into(),
-                        material: taillight_mat.clone(),
-                        transform: Transform::from_xyz(-2.05, y, 0.05),
-                        ..default()
-                    });
+                // Separate front-wheel sprites at the front axle so the steer
+                // system keeps yawing them; the body art leaves wheel-well
+                // arches where they sit.
+                for &(x, y) in &[(1.3, 1.05), (1.3, -1.05)] {
+                    car.spawn((
+                        SpriteBundle {
+                            texture: wheel_texture.clone(),
+                            sprite: Sprite {
+                                custom_size: Some(Vec2::new(
+                                    5.0 / TEXELS_PER_UNIT,
+                                    4.0 / TEXELS_PER_UNIT,
+                                )),
+                                ..default()
+                            },
+                            transform: Transform::from_xyz(x, y, 0.03),
+                            ..default()
+                        },
+                        FrontWheel { car_index: i },
+                    ));
                 }
             });
     }
@@ -814,12 +765,16 @@ mod tests {
             }
         }
         let mut app = App::new();
+        app.add_plugins(AssetPlugin::default());
         app.insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64));
         app.init_resource::<Assets<Mesh>>();
         app.init_resource::<Assets<ColorMaterial>>();
+        app.init_asset::<Image>();
         app.insert_resource(shell);
         app.add_systems(Startup, setup_car);
         app.add_systems(Update, update_front_wheel_steer);
+        bevy::tasks::IoTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
         app.update();
 
         let mut wheels = app.world_mut().query::<(&FrontWheel, &Transform)>();

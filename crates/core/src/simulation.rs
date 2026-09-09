@@ -730,6 +730,7 @@ mod tests {
         Track {
             name: "test loop".to_owned(),
             width: 20.0,
+            widths: vec![20.0; 5],
             points: vec![
                 Vec2::new(0.0, 0.0),
                 Vec2::new(2000.0, 0.0),

@@ -11,7 +11,18 @@ pub const SAMPLE_CIRCUIT: &str = include_str!("../data/tracks/sample-circuit.jso
 pub struct Track {
     pub name: String,
     /// Full road width in world units.
+    ///
+    /// Conservative floor over `widths`: for a track authored with a
+    /// `widths` array this is the array MINIMUM, so consumers still
+    /// reading `width` (walls, surface sampling) treat the whole loop as
+    /// its narrowest and never gain corridor they do not have. Tracks
+    /// authored with a single global width keep that width exactly.
     pub width: f32,
+    /// Per-vertex full road width in world units, one entry per entry of
+    /// `points` (`widths.len() == points.len()`); the closing entry
+    /// repeats the opening one, mirroring the points loop. Tracks authored
+    /// with a single global `width` resolve to a uniform array.
+    pub widths: Vec<f32>,
     /// Center polyline vertices; the last equals the first (closed loop).
     pub points: Vec<Vec2>,
     /// Surface of segment `i`, which connects `points[i]` to `points[i + 1]`.
@@ -200,6 +211,11 @@ pub enum TrackParseError {
     TooFewPoints(usize),
     /// Width is zero or negative; a road needs positive width.
     InvalidWidth(f32),
+    /// A `widths` array whose entry count differs from the points count;
+    /// one width per vertex (closing repeat included) is required.
+    WidthsLengthMismatch { points: usize, widths: usize },
+    /// A `widths` entry that is zero or negative.
+    InvalidVertexWidth { index: usize, value: f32 },
     /// A surface span names a surface that does not exist.
     UnknownSurface {
         found: String,
@@ -250,6 +266,14 @@ impl std::fmt::Display for TrackParseError {
             ),
             TrackParseError::InvalidWidth(width) => {
                 write!(f, "track width must be positive, got {width}")
+            }
+            TrackParseError::WidthsLengthMismatch { points, widths } => write!(
+                f,
+                "track widths has {widths} entries but the track has {points} points; \
+                 one width per vertex (closing repeat included) is required"
+            ),
+            TrackParseError::InvalidVertexWidth { index, value } => {
+                write!(f, "track widths[{index}] must be positive, got {value}")
             }
             TrackParseError::UnknownSurface { found, known } => write!(
                 f,
@@ -302,6 +326,8 @@ impl std::error::Error for TrackParseError {}
 struct TrackSource {
     name: String,
     width: f32,
+    #[serde(default)]
+    widths: Option<Vec<f32>>,
     points: Vec<[f32; 2]>,
     surfaces: Vec<SurfaceSpanSource>,
     #[serde(default)]
@@ -483,9 +509,40 @@ impl Track {
         let closing = points[0];
         *points.last_mut().unwrap() = closing;
 
+        // Resolve per-vertex widths: an authored `widths` array wins (its
+        // minimum then supersedes the global `width` for legacy consumers);
+        // otherwise the global width broadcasts to a uniform array.
+        let (width, widths) = match src.widths {
+            None => (src.width, vec![src.width; points.len()]),
+            Some(raw) => {
+                if raw.len() != src.points.len() {
+                    return Err(TrackParseError::WidthsLengthMismatch {
+                        points: src.points.len(),
+                        widths: raw.len(),
+                    });
+                }
+                for (index, value) in raw.iter().enumerate() {
+                    if !value.is_finite() || *value <= 0.0 {
+                        return Err(TrackParseError::InvalidVertexWidth {
+                            index,
+                            value: *value,
+                        });
+                    }
+                }
+                let mut resolved = raw;
+                // The closing vertex IS the first vertex; canonicalize its
+                // width like the points loop so the invariant holds exactly.
+                let opening = resolved[0];
+                *resolved.last_mut().unwrap() = opening;
+                let min = resolved.iter().copied().fold(f32::INFINITY, f32::min);
+                (min, resolved)
+            }
+        };
+
         Ok(Track {
             name: src.name,
-            width: src.width,
+            width,
+            widths,
             points,
             surfaces,
             props,
@@ -737,6 +794,89 @@ mod tests {
 
         // Boundary: a small positive width parses.
         let text = track_text("[[0,0],[10,0],[10,10],[0,0]]", "0.5", "[]");
+        assert!(Track::parse(&text).is_ok());
+    }
+
+    /// Raw track text with an optional per-vertex widths array.
+    fn track_text_widths(points: &str, width: &str, widths: &str, surfaces: &str) -> String {
+        format!(
+            r#"{{"name": "T", "width": {width}, "widths": {widths}, "points": {points}, "surfaces": {surfaces}}}"#
+        )
+    }
+
+    #[test]
+    fn widths_array_resolves_per_vertex_and_width_is_the_minimum() {
+        let text = track_text_widths(
+            "[[0,0],[10,0],[10,10],[0,0]]",
+            "10",
+            "[8.0, 12.0, 16.0, 8.0]",
+            "[]",
+        );
+        let track = Track::parse(&text).unwrap();
+        assert_eq!(track.widths, vec![8.0, 12.0, 16.0, 8.0]);
+        assert_eq!(track.widths.len(), track.points.len());
+        // The legacy global width becomes the array minimum so consumers
+        // still reading `width` treat the loop as its narrowest.
+        assert_eq!(track.width, 8.0);
+
+        // Boundary: the closing entry repeats the opening vertex, so it is
+        // canonicalized to the opening width like the points loop.
+        let text = track_text_widths(
+            "[[0,0],[10,0],[10,10],[0,0]]",
+            "10",
+            "[8.0, 12.0, 16.0, 99.0]",
+            "[]",
+        );
+        let track = Track::parse(&text).unwrap();
+        assert_eq!(track.widths, vec![8.0, 12.0, 16.0, 8.0]);
+        assert_eq!(track.width, 8.0);
+    }
+
+    #[test]
+    fn global_width_without_widths_resolves_a_uniform_array() {
+        let track = Track::parse(&closed_triangle_text()).unwrap();
+        assert_eq!(track.width, 10.0);
+        assert_eq!(track.widths, vec![10.0; track.points.len()]);
+    }
+
+    #[test]
+    fn widths_length_mismatch_is_rejected_with_descriptive_error() {
+        // The triangle has 4 points (closing repeat included).
+        for widths in ["[]", "[10.0, 10.0]", "[10.0, 10.0, 10.0, 10.0, 10.0]"] {
+            let text = track_text_widths("[[0,0],[10,0],[10,10],[0,0]]", "10", widths, "[]");
+            let err = Track::parse(&text).unwrap_err();
+            assert!(
+                matches!(err, TrackParseError::WidthsLengthMismatch { .. }),
+                "{widths}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("widths"), "message: {msg}");
+        }
+    }
+
+    #[test]
+    fn non_positive_vertex_width_is_rejected_with_index() {
+        for (widths, index) in [
+            ("[10.0, 0.0, 10.0, 10.0]", 1),
+            ("[10.0, 10.0, -3.0, 10.0]", 2),
+        ] {
+            let text = track_text_widths("[[0,0],[10,0],[10,10],[0,0]]", "10", widths, "[]");
+            let err = Track::parse(&text).unwrap_err();
+            assert!(
+                matches!(err, TrackParseError::InvalidVertexWidth { index: i, .. } if i == index),
+                "{widths}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains(&format!("widths[{index}]")), "message: {msg}");
+        }
+
+        // Boundary: small positive vertex widths parse.
+        let text = track_text_widths(
+            "[[0,0],[10,0],[10,10],[0,0]]",
+            "10",
+            "[0.5, 10.0, 10.0, 0.5]",
+            "[]",
+        );
         assert!(Track::parse(&text).is_ok());
     }
 

@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn all_constants_match_the_gpl_source_of_truth() {
-        let gpl = include_str!("../../../assets/palette/golden-hour.gpl");
+        let gpl = include_str!("../assets/palette/golden-hour.gpl");
         let entries: Vec<(String, String)> = gpl
             .lines()
             .filter_map(|line| {

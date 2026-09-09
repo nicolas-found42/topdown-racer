@@ -6,7 +6,7 @@
 //! this geometry and adds meshes/materials.
 
 use glam::Vec2;
-use topdown_racer_core::track::{PropKind, Surface, Track, ZoneKind};
+use topdown_racer_core::track::{Surface, Track, ZoneKind};
 
 /// One planar quad: top-left, top-right, bottom-right, bottom-left corners.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,13 +37,6 @@ pub struct ZoneQuad {
     pub kind: ZoneKind,
 }
 
-/// A decor-prop placeholder quad tagged with the prop kind (material choice).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PropQuad {
-    pub quad: Quad,
-    pub kind: PropKind,
-}
-
 /// All render geometry for one Track, in deterministic spawn order.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TrackRenderGeometry {
@@ -61,8 +54,6 @@ pub struct TrackRenderGeometry {
     pub start_line: Vec<Quad>,
     /// Terrain-zone fill quads in author order, fan-triangulated per zone.
     pub zones: Vec<ZoneQuad>,
-    /// Decor-prop placeholder quads in author order, centered on the prop.
-    pub props: Vec<PropQuad>,
 }
 
 /// Computes all render geometry for a closed polyline circuit.
@@ -265,29 +256,13 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
         }
     }
 
-    // Decor props render as small placeholder quads centered on the prop,
-    // rotated to the authored facing. Half-extent 1.0 clears the road edge
-    // line without dwarfing nearby kerbs.
-    for prop in &track.props {
-        let (sin, cos) = prop.rotation.sin_cos();
-        let corners = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)];
-        let verts =
-            corners.map(|(x, y)| prop.position + Vec2::new(x * cos - y * sin, x * sin + y * cos));
-        geo.props.push(PropQuad {
-            quad: Quad {
-                verts: [verts[0], verts[1], verts[2], verts[3]],
-            },
-            kind: prop.kind,
-        });
-    }
-
     geo
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use topdown_racer_core::track::{PropKind, ZoneKind, SAMPLE_CIRCUIT};
+    use topdown_racer_core::track::{ZoneKind, SAMPLE_CIRCUIT};
 
     #[test]
     fn sample_circuit_geometry_counts_match_segments_and_grid() {
@@ -321,7 +296,6 @@ mod tests {
             .chain(geo.guardrails.iter().copied())
             .chain(geo.start_line.iter().copied())
             .chain(geo.zones.iter().map(|z| z.quad))
-            .chain(geo.props.iter().map(|p| p.quad))
             .collect();
         assert!(!all.is_empty());
         for quad in all {
@@ -355,7 +329,8 @@ mod tests {
         assert_eq!(geo.guardrails.len(), 5);
     }
     /// A v2 track: quad sand zone, triangle dirt zone, two props, and the
-    /// start line overridden to segment 1.
+    /// start line overridden to segment 1. The props parse but emit no
+    /// geometry: scenery sprites read track.props directly.
     fn v2_track() -> Track {
         let text = r#"{
             "name": "V2 Geo",
@@ -399,30 +374,6 @@ mod tests {
         let plain = Track::parse(SAMPLE_CIRCUIT).unwrap();
         assert!(build_track_geometry(&plain).zones.is_empty());
         assert_eq!(build_track_geometry(&v2_track()), geo);
-    }
-
-    #[test]
-    fn props_emit_centered_placeholder_quads_in_order() {
-        let geo = build_track_geometry(&v2_track());
-        assert_eq!(geo.props.len(), 2);
-        assert_eq!(geo.props[0].kind, PropKind::Tree);
-        assert_eq!(geo.props[1].kind, PropKind::TireStack);
-        for (prop_quad, at) in geo
-            .props
-            .iter()
-            .zip([Vec2::new(50.0, 50.0), Vec2::new(60.0, 60.0)])
-        {
-            assert!(
-                (quad_center(prop_quad.quad) - at).length() < 1e-3,
-                "prop quad must center on its position, got {:?}",
-                prop_quad.quad.verts
-            );
-            for v in prop_quad.quad.verts {
-                assert!(v.is_finite());
-            }
-        }
-        let plain = Track::parse(SAMPLE_CIRCUIT).unwrap();
-        assert!(build_track_geometry(&plain).props.is_empty());
     }
 
     #[test]
