@@ -362,7 +362,7 @@ fn setup_car(mut commands: Commands, asset_server: Res<AssetServer>, sim: Res<Sh
                 car.spawn(SpriteBundle {
                     texture: body_texture.clone(),
                     sprite: Sprite {
-                        custom_size: Some(Vec2::new(4.2, 2.0)),
+                        custom_size: Some(Vec2::new(34.0 / TEXELS_PER_UNIT, 2.0)),
                         ..default()
                     },
                     transform: Transform::from_xyz(0.0, 0.0, 0.02),
