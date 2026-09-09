@@ -185,7 +185,7 @@ impl AiDriver {
         // centerline instead of an apex.
         let aim_dist = (vf * AIM_SPEED_SCALE).clamp(AIM_MIN, AIM_MAX);
         let aim_arc = frame.arc + aim_dist;
-        let max_offset = (view.track.road_half_width() - EDGE_MARGIN).max(0.5);
+        let max_offset = (view.track.road_half_width_at_arc(aim_arc) - EDGE_MARGIN).max(0.5);
         let mut offset = if off_track {
             0.0
         } else {
@@ -385,6 +385,50 @@ mod tests {
         assert!(
             input.brake > 0.5,
             "must brake for the slower car, got {input:?}"
+        );
+    }
+
+    #[test]
+    fn driver_line_clamp_follows_local_width_at_the_aim_point() {
+        // Two tracks identical except widths, uniform 8 vs ramping 8 -> 60.
+        // The uniform cap (half 4 - EDGE_MARGIN 2 = 2) clamps the dodge
+        // line harder than the local cap at the aim point (~17.6): the
+        // driver on the wide-at-aim track commits to a wider line for the
+        // same traffic.
+        let text = |widths: &str| {
+            format!(
+                r#"{{"name": "Ramp", "width": 8.0, "widths": {widths}, "points": [[0,0],[120,0],[120,60],[0,0]], "surfaces": []}}"#
+            )
+        };
+        let uniform = Track::parse(&text("[8.0, 8.0, 8.0, 8.0]")).unwrap();
+        let wide_ahead = Track::parse(&text("[8.0, 60.0, 60.0, 8.0]")).unwrap();
+
+        // Three slower rivals ahead on the right: the driver commits to a
+        // left line worth more than the uniform cap.
+        let me = (Vec2::new(60.0, 0.0), Vec2::new(20.0, 0.0));
+        let field = [
+            me,
+            (Vec2::new(70.0, -3.5), Vec2::new(5.0, 0.0)),
+            (Vec2::new(76.0, -3.5), Vec2::new(5.0, 0.0)),
+            (Vec2::new(82.0, -3.5), Vec2::new(5.0, 0.0)),
+        ];
+
+        let mut uniform_driver = AiDriver::new(1);
+        let mut wide_driver = AiDriver::new(1);
+        let mut uniform_steer = 0.0;
+        let mut wide_steer = 0.0;
+        for _ in 0..40 {
+            uniform_steer = uniform_driver
+                .compute_input(view(&uniform, me.0, 0.0, me.1, &field))
+                .steer;
+            wide_steer = wide_driver
+                .compute_input(view(&wide_ahead, me.0, 0.0, me.1, &field))
+                .steer;
+        }
+        assert!(
+            wide_steer.abs() > uniform_steer.abs() + 0.05,
+            "wide-at-aim driver must commit wider than the uniform cap: \
+             wide {wide_steer} vs uniform {uniform_steer}"
         );
     }
 

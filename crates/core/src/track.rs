@@ -13,10 +13,12 @@ pub struct Track {
     /// Full road width in world units.
     ///
     /// Conservative floor over `widths`: for a track authored with a
-    /// `widths` array this is the array MINIMUM, so consumers still
-    /// reading `width` (walls, surface sampling) treat the whole loop as
-    /// its narrowest and never gain corridor they do not have. Tracks
-    /// authored with a single global width keep that width exactly.
+    /// `widths` array this is the array MINIMUM. The simulation no longer
+    /// reads it — walls, surface sampling, checkpoints, and AI planning
+    /// all consume the local interpolated width — so the field remains
+    /// only for the render-geometry consumer until the contract step
+    /// removes it. Tracks authored with a single global width keep that
+    /// width exactly.
     pub width: f32,
     /// Per-vertex full road width in world units, one entry per entry of
     /// `points` (`widths.len() == points.len()`); the closing entry
@@ -107,6 +109,10 @@ pub struct NearestSegment {
     pub closest_point: Vec2,
     /// Distance from the query pose to `closest_point`.
     pub distance: f32,
+    /// Fraction along the segment (0 = start vertex, 1 = end vertex) at
+    /// which `closest_point` sits; the interpolation parameter for
+    /// per-vertex quantities such as width.
+    pub t: f32,
 }
 
 /// The Car's position expressed in the Track's centerline frame: how far
@@ -559,25 +565,35 @@ impl Track {
             .sum()
     }
 
-    /// Point on the centerline at arc position `arc` (0 = first vertex,
-    /// increasing along the polyline's forward direction; wraps at the loop).
-    pub fn point_at_arc(&self, arc: f32) -> Vec2 {
+    /// Locates the polyline segment containing `arc` and the arc distance
+    /// remaining within it, walking the loop exactly as `point_at_arc`
+    /// always has. Falls back to the opening segment only when accumulated
+    /// float drift overshoots the loop length.
+    fn locate_arc(&self, arc: f32) -> (usize, f32) {
         let segments = self.points.len() - 1;
         let mut remaining = arc.rem_euclid(self.total_length());
         for seg in 0..segments {
-            let a = self.points[seg];
-            let b = self.points[seg + 1];
-            let len = a.distance(b);
+            let len = self.points[seg].distance(self.points[seg + 1]);
             if remaining <= len {
-                return if len > 1e-6 {
-                    a + (b - a) / len * remaining
-                } else {
-                    a
-                };
+                return (seg, remaining);
             }
             remaining -= len;
         }
-        self.points[0]
+        (0, 0.0)
+    }
+
+    /// Point on the centerline at arc position `arc` (0 = first vertex,
+    /// increasing along the polyline's forward direction; wraps at the loop).
+    pub fn point_at_arc(&self, arc: f32) -> Vec2 {
+        let (seg, remaining) = self.locate_arc(arc);
+        let a = self.points[seg];
+        let b = self.points[seg + 1];
+        let len = a.distance(b);
+        if len > 1e-6 {
+            a + (b - a) / len * remaining
+        } else {
+            a
+        }
     }
 
     /// Expresses `pose` in the centerline frame: arc position, forward
@@ -633,12 +649,46 @@ impl Track {
         self.width
     }
 
+    /// Half road width at `pose`: the local width, linearly interpolated
+    /// between the nearest segment's endpoint widths by the projection
+    /// along that segment. Lateral offset does not matter.
+    pub fn road_half_width_at(&self, pose: Vec2) -> f32 {
+        self.road_width_at_nearest(self.nearest_segment(pose)) * 0.5
+    }
+
+    /// Distance from the centerline polyline to the boundary wall at
+    /// `pose`, following the same interpolated local width as
+    /// [`Track::road_half_width_at`].
+    pub fn wall_distance_at(&self, pose: Vec2) -> f32 {
+        self.road_width_at_nearest(self.nearest_segment(pose))
+    }
+
+    /// Full road width at a located nearest segment: linearly interpolated
+    /// between the segment's endpoint widths by the stored projection
+    /// fraction. Uniform-width tracks return their width exactly.
+    fn road_width_at_nearest(&self, nearest: NearestSegment) -> f32 {
+        let w0 = self.widths[nearest.segment_index];
+        w0 + (self.widths[nearest.segment_index + 1] - w0) * nearest.t
+    }
+
+    /// Half road width at arc position `arc`, located the same way
+    /// [`Track::point_at_arc`] walks the polyline. Uniform-width tracks
+    /// return their half width exactly.
+    pub fn road_half_width_at_arc(&self, arc: f32) -> f32 {
+        let (seg, remaining) = self.locate_arc(arc);
+        let len = self.points[seg].distance(self.points[seg + 1]);
+        let frac = if len > 1e-6 { remaining / len } else { 0.0 };
+        let w0 = self.widths[seg];
+        (w0 + (self.widths[seg + 1] - w0) * frac) * 0.5
+    }
+
     /// Finds the closest polyline segment to `pose`.
     pub fn nearest_segment(&self, pose: Vec2) -> NearestSegment {
         let segment_count = self.points.len() - 1;
         let mut best_seg = 0;
         let mut best_point = self.points[0];
         let mut best_dist_sq = f32::INFINITY;
+        let mut best_t = 0.0;
 
         for i in 0..segment_count {
             let a = self.points[i];
@@ -656,6 +706,7 @@ impl Track {
                 best_dist_sq = dist_sq;
                 best_point = candidate;
                 best_seg = i;
+                best_t = t;
             }
         }
 
@@ -663,26 +714,29 @@ impl Track {
             segment_index: best_seg,
             closest_point: best_point,
             distance: best_dist_sq.sqrt(),
+            t: best_t,
         }
     }
 
-    /// Samples the Track surface at `pose`. If within `road_half_width()` of
-    /// the polyline centerline, returns the segment's authored surface.
-    /// Outside the road corridor, returns off-track [`Surface::Grass`].
+    /// Samples the Track surface at `pose`. If within the LOCAL road half
+    /// width (linearly interpolated between the nearest segment's vertex
+    /// widths) of the polyline centerline, returns the segment's authored
+    /// surface. Outside the road corridor, returns off-track
+    /// [`Surface::Grass`].
     pub fn sample_surface(&self, pose: Vec2) -> Surface {
         let nearest = self.nearest_segment(pose);
-        if nearest.distance <= self.road_half_width() {
+        if nearest.distance <= self.road_width_at_nearest(nearest) * 0.5 {
             self.surfaces[nearest.segment_index]
         } else {
             Surface::Grass
         }
     }
 
-    /// Checks if `pose` has reached or penetrated a Track boundary wall.
-    /// If so, returns a [`WallContact`] with the inward normal and penetration depth.
+    /// Checks if `pose` has reached or penetrated a Track boundary wall at
+    /// the LOCAL wall distance (following the interpolated width). If so,
     pub fn wall_contact(&self, pose: Vec2) -> Option<WallContact> {
         let nearest = self.nearest_segment(pose);
-        let wall_dist = self.wall_distance();
+        let wall_dist = self.road_width_at_nearest(nearest);
         if nearest.distance > wall_dist {
             let penetration = nearest.distance - wall_dist;
             let normal = if nearest.distance > 1e-6 {
@@ -881,6 +935,53 @@ mod tests {
     }
 
     #[test]
+    fn road_width_interpolates_between_vertex_widths_and_is_exact_when_uniform() {
+        let track = Track::parse(&track_text_widths(
+            "[[0,0],[120,0],[120,60],[0,60],[0,0]]",
+            "10.0",
+            "[10.0, 30.0, 30.0, 10.0, 10.0]",
+            "[]",
+        ))
+        .unwrap();
+
+        // Interpolation follows the nearest segment, parameterized by the
+        // projection along it; lateral offset does not change the width.
+        assert_eq!(track.road_half_width_at(Vec2::new(0.0, 0.0)), 5.0);
+        assert_eq!(track.road_half_width_at(Vec2::new(60.0, 0.0)), 10.0);
+        assert_eq!(track.road_half_width_at(Vec2::new(60.0, 5.0)), 10.0);
+        assert_eq!(track.road_half_width_at(Vec2::new(120.0, 0.0)), 15.0);
+        assert_eq!(track.road_half_width_at(Vec2::new(120.0, 30.0)), 15.0);
+
+        // Wall distance keeps the authored ratio: walls sit at the full
+        // local width from the centerline.
+        assert_eq!(track.wall_distance_at(Vec2::new(60.0, 0.0)), 20.0);
+        assert_eq!(track.wall_distance_at(Vec2::new(120.0, 30.0)), 30.0);
+
+        // Arc-space queries interpolate identically for the AI's line clamp.
+        assert_eq!(track.road_half_width_at_arc(0.0), 5.0);
+        assert_eq!(track.road_half_width_at_arc(60.0), 10.0);
+        assert_eq!(track.road_half_width_at_arc(120.0), 15.0);
+        assert_eq!(track.road_half_width_at_arc(180.0), 15.0);
+    }
+
+    #[test]
+    fn local_width_queries_are_bit_exact_no_ops_on_uniform_width_tracks() {
+        let track = Track::parse(&closed_triangle_text()).unwrap();
+        for pose in [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(5.0, 0.0),
+            Vec2::new(5.0, 5.0),
+            Vec2::new(2.5, 7.0),
+        ] {
+            assert_eq!(track.road_half_width_at(pose), 5.0);
+            assert_eq!(track.wall_distance_at(pose), 10.0);
+        }
+        for arc in [0.0, 4.25, 11.7, 25.0] {
+            assert_eq!(track.road_half_width_at_arc(arc), 5.0);
+        }
+    }
+
+    #[test]
     fn unknown_surface_is_rejected_with_descriptive_error() {
         let text = track_text(
             "[[0,0],[10,0],[10,10],[0,0]]",
@@ -974,6 +1075,39 @@ mod tests {
         assert_eq!(track.sample_surface(Vec2::new(50.0, -10.0)), Surface::Grass);
         // Beyond road edge on gravel segment (x = 170.0, distance 10.0 > 7.0):
         assert_eq!(track.sample_surface(Vec2::new(170.0, 60.0)), Surface::Grass);
+    }
+
+    #[test]
+    fn surface_classification_uses_local_width_not_the_global_minimum() {
+        let track = Track::parse(&track_text_widths(
+            "[[0,0],[120,0],[120,60],[0,60],[0,0]]",
+            "10.0",
+            "[10.0, 30.0, 30.0, 10.0, 10.0]",
+            "[]",
+        ))
+        .unwrap();
+        // (local half width ~6.7), on-road at the wide end (local half
+        // width ~13.3). The global-minimum floor (half 5) would call both
+        // Grass.
+        assert_eq!(track.sample_surface(Vec2::new(20.0, 8.0)), Surface::Grass);
+        assert_eq!(track.sample_surface(Vec2::new(100.0, 8.0)), Surface::Road);
+    }
+
+    #[test]
+    fn wall_contact_uses_local_width_not_the_global_minimum() {
+        let track = Track::parse(&track_text_widths(
+            "[[0,0],[120,0],[120,60],[0,60],[0,0]]",
+            "10.0",
+            "[10.0, 30.0, 30.0, 10.0, 10.0]",
+            "[]",
+        ))
+        .unwrap();
+
+        // Sixteen units off the centerline: past the wall at the narrow
+        // end (local wall ~13.3), clear at the wide end (local wall ~26.7).
+        // The global-minimum floor (wall 10) would flag both as contact.
+        assert!(track.wall_contact(Vec2::new(20.0, 16.0)).is_some());
+        assert!(track.wall_contact(Vec2::new(100.0, 16.0)).is_none());
     }
 
     #[test]

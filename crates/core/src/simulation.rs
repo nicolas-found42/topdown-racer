@@ -240,7 +240,6 @@ impl Sim {
             RacePhase::Finished => false,
         };
         let total_cps = self.track.points.len() - 1;
-        let cp_radius = self.track.wall_distance() * 1.5;
 
         // Step all cars. AI drivers perceive the field (every Car's pose and
         // velocity) plus the Track, and answer with player-identical inputs.
@@ -272,7 +271,7 @@ impl Sim {
 
             // In Racing phase, accumulate lap time and check ordered progress
             if self.phase == RacePhase::Racing {
-                advance_lap_progress(car, &self.track, total_cps, cp_radius);
+                advance_lap_progress(car, &self.track, total_cps);
             }
         }
 
@@ -381,11 +380,14 @@ impl SurfacePhysics {
 /// Advances one Car's lap/checkpoint progress for a single tick: accumulates
 /// the current lap time and, on ordered checkpoint entry, records lap times,
 /// best lap, completed laps, and the next checkpoint to clear.
-fn advance_lap_progress(car: &mut CarState, track: &Track, total_cps: usize, cp_radius: f32) {
+fn advance_lap_progress(car: &mut CarState, track: &Track, total_cps: usize) {
     car.current_lap_ticks += 1;
 
     let start = track.start_segment;
     let target_cp = car.next_checkpoint;
+    // Checkpoint clearing radius follows the checkpoint vertex's local
+    // width (uniform-width tracks: wall_distance * 1.5, as before).
+    let cp_radius = track.widths[target_cp] * CHECKPOINT_CLEAR_WIDTH_FACTOR;
     let cp_pos = track.points[target_cp];
     let entry_dir = if target_cp == 0 {
         cp_pos - track.points[total_cps - 1]
@@ -629,6 +631,11 @@ pub const LATERAL_GRIP_RATE: f32 = 24.0;
 const HANDBRAKE_LATERAL_GRIP_FACTOR: f32 = 0.12;
 /// Deceleration applied along heading when handbrake is engaged.
 const HANDBRAKE_DECEL: f32 = 12.0;
+/// Factor over the checkpoint vertex's local road width that yields the
+/// checkpoint clearing radius (uniform-width tracks: wall_distance * 1.5,
+/// as before).
+const CHECKPOINT_CLEAR_WIDTH_FACTOR: f32 = 1.5;
+
 /// Minimum forward speed to be eligible for the Drift state.
 const DRIFT_SPEED_MIN: f32 = 3.0;
 /// Minimum lateral slip speed to enter the Drift state.
@@ -2041,6 +2048,46 @@ mod tests {
         }
         let snap = cross_checkpoint(&mut sim, Vec2::new(100.0, 100.0), Vec2::new(0.0, 10.0));
         assert_eq!(snap.completed_laps, 1);
+        assert!(snap.lap_times[0].is_some());
+    }
+
+    #[test]
+    fn checkpoint_radius_follows_local_vertex_width() {
+        // Straight ramp: widths 10 -> 30 -> 30 -> 10. Checkpoint 1 sits on
+        // the wide vertex (120, 0): its clearing radius is 30 * 1.5 = 45.
+        // The global-minimum floor (10 * 1.5 = 15) would refuse a 30-unit
+        // clear, breaking the ordered walk below.
+        let track = Track::parse(
+            r#"{
+                "name": "Ramp",
+                "width": 10.0,
+                "widths": [10.0, 30.0, 30.0, 10.0, 10.0],
+                "points": [[0,0],[120,0],[120,60],[0,60],[0,0]],
+                "surfaces": []
+            }"#,
+        )
+        .unwrap();
+        let mut sim = Sim::new(track, 1);
+
+        // Thirty units short of checkpoint 1, charging at it: clears under
+        // the local radius, misses under the global-minimum radius.
+        let snap = cross_checkpoint(&mut sim, Vec2::new(90.0, 0.0), Vec2::new(20.0, 0.0));
+        assert_eq!(snap.completed_laps, 0);
+
+        // Walk the remaining ordered checkpoints to the start line.
+        let legs = [
+            (Vec2::new(120.0, 60.0), Vec2::new(0.0, 20.0)),
+            (Vec2::new(0.0, 60.0), Vec2::new(-20.0, 0.0)),
+        ];
+        for (at, velocity) in legs {
+            let snap = cross_checkpoint(&mut sim, at, velocity);
+            assert_eq!(snap.completed_laps, 0);
+        }
+        let snap = cross_checkpoint(&mut sim, Vec2::new(0.0, 0.0), Vec2::new(0.0, -20.0));
+        assert_eq!(
+            snap.completed_laps, 1,
+            "30-unit clear of the wide checkpoint must hold"
+        );
         assert!(snap.lap_times[0].is_some());
     }
 }
