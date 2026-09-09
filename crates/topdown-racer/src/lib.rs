@@ -8,6 +8,7 @@ mod fmt;
 mod hud;
 mod menu;
 mod overlay;
+pub mod palette;
 mod race;
 mod results;
 mod track_geometry;
@@ -204,12 +205,12 @@ fn setup_track(
     let kerb_red = materials.add(Color::srgb(0.85, 0.18, 0.18));
     let kerb_white = materials.add(Color::srgb(0.95, 0.95, 0.95));
     let guardrail_mat = materials.add(Color::srgb(0.72, 0.75, 0.80));
-    let sand_mat = materials.add(Color::srgb(0.76, 0.70, 0.50));
-    let dirt_mat = materials.add(Color::srgb(0.45, 0.33, 0.20));
-    let dark_grass_mat = materials.add(Color::srgb(0.08, 0.25, 0.10));
-    let tree_mat = materials.add(Color::srgb(0.10, 0.45, 0.15));
-    let tire_stack_mat = materials.add(Color::srgb(0.15, 0.15, 0.17));
-    let brake_board_mat = materials.add(Color::srgb(0.80, 0.15, 0.15));
+    let sand_mat = materials.add(palette::color(palette::DRY_GOLD));
+    let dirt_mat = materials.add(palette::color(palette::DIRT_BASE));
+    let dark_grass_mat = materials.add(palette::color(palette::GRASS_SHADOW));
+    let tree_mat = materials.add(palette::color(palette::FOLIAGE_BASE));
+    let tire_stack_mat = materials.add(palette::color(palette::ASPHALT_DARKEST));
+    let brake_board_mat = materials.add(palette::color(palette::KERB_BASE));
 
     // All quad math comes from the pure geometry seam; this system only
     // chooses materials and z-ordering.

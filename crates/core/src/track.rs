@@ -113,14 +113,26 @@ pub struct CenterlineFrame {
     pub lateral: f32,
 }
 
+/// Finds the known variant whose name equals `name`, or `None`.
+fn known_named<T: Copy>(known: &[T], name: &str, name_of: fn(T) -> &'static str) -> Option<T> {
+    known
+        .iter()
+        .copied()
+        .find(|variant| name_of(*variant) == name)
+}
+
+/// Every known variant's name, sorted for error messages.
+fn sorted_names<T: Copy>(known: &[T], name_of: fn(T) -> &'static str) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = known.iter().copied().map(name_of).collect();
+    names.sort_unstable();
+    names
+}
+
 impl Surface {
     pub const KNOWN: [Surface; 3] = [Surface::Road, Surface::Grass, Surface::Gravel];
 
     fn from_name(name: &str) -> Option<Surface> {
-        Surface::KNOWN
-            .iter()
-            .copied()
-            .find(|surface| surface.name() == name)
+        known_named(&Surface::KNOWN, name, Self::name)
     }
 
     fn name(self) -> &'static str {
@@ -135,10 +147,7 @@ impl PropKind {
     pub const KNOWN: [PropKind; 3] = [PropKind::Tree, PropKind::TireStack, PropKind::BrakeBoard];
 
     fn from_name(name: &str) -> Option<PropKind> {
-        PropKind::KNOWN
-            .iter()
-            .copied()
-            .find(|kind| kind.name() == name)
+        known_named(&PropKind::KNOWN, name, Self::name)
     }
 
     fn name(self) -> &'static str {
@@ -154,10 +163,7 @@ impl ZoneKind {
     pub const KNOWN: [ZoneKind; 3] = [ZoneKind::Sand, ZoneKind::Dirt, ZoneKind::DarkGrass];
 
     fn from_name(name: &str) -> Option<ZoneKind> {
-        ZoneKind::KNOWN
-            .iter()
-            .copied()
-            .find(|kind| kind.name() == name)
+        known_named(&ZoneKind::KNOWN, name, Self::name)
     }
 
     fn name(self) -> &'static str {
@@ -173,10 +179,7 @@ impl Theme {
     pub const KNOWN: [Theme; 1] = [Theme::Hillside];
 
     fn from_name(name: &str) -> Option<Theme> {
-        Theme::KNOWN
-            .iter()
-            .copied()
-            .find(|theme| theme.name() == name)
+        known_named(&Theme::KNOWN, name, Self::name)
     }
 
     fn name(self) -> &'static str {
@@ -396,9 +399,7 @@ impl Track {
                 });
             }
             let Some(surface) = Surface::from_name(&span.surface) else {
-                let mut known: Vec<&'static str> =
-                    Surface::KNOWN.iter().map(|s| s.name()).collect();
-                known.sort_unstable();
+                let known = sorted_names(&Surface::KNOWN, Surface::name);
                 return Err(TrackParseError::UnknownSurface {
                     found: span.surface.clone(),
                     known,
@@ -412,8 +413,7 @@ impl Track {
         let theme = match &src.theme {
             None => Theme::Hillside,
             Some(name) => Theme::from_name(name).ok_or_else(|| {
-                let mut known: Vec<&'static str> = Theme::KNOWN.iter().map(|t| t.name()).collect();
-                known.sort_unstable();
+                let known = sorted_names(&Theme::KNOWN, Theme::name);
                 TrackParseError::UnknownTheme {
                     found: name.clone(),
                     known,
@@ -424,9 +424,7 @@ impl Track {
         let mut props = Vec::with_capacity(src.props.len());
         for prop in &src.props {
             let Some(kind) = PropKind::from_name(&prop.kind) else {
-                let mut known: Vec<&'static str> =
-                    PropKind::KNOWN.iter().map(|k| k.name()).collect();
-                known.sort_unstable();
+                let known = sorted_names(&PropKind::KNOWN, PropKind::name);
                 return Err(TrackParseError::UnknownPropType {
                     found: prop.kind.clone(),
                     known,
@@ -442,9 +440,7 @@ impl Track {
         let mut zones = Vec::with_capacity(src.terrain_zones.len());
         for zone in &src.terrain_zones {
             let Some(kind) = ZoneKind::from_name(&zone.kind) else {
-                let mut known: Vec<&'static str> =
-                    ZoneKind::KNOWN.iter().map(|k| k.name()).collect();
-                known.sort_unstable();
+                let known = sorted_names(&ZoneKind::KNOWN, ZoneKind::name);
                 return Err(TrackParseError::UnknownZoneKind {
                     found: zone.kind.clone(),
                     known,
