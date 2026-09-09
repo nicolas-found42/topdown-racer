@@ -12,6 +12,18 @@ _Avoid_: level, map, course
 The player- or AI-driven vehicle simulated as a point mass with heading, longitudinal accel/brake/drag and lateral grip with slip angle.
 _Avoid_: ship, sprite, body
 
+**Car Sprite**:
+The pixel-art image drawn for a Car during a Race, one livery per grid slot; purely presentational, distinct from the simulated Car.
+_Avoid_: car visual, drawing, mesh
+
+**Livery**:
+One Car Sprite's color scheme and race number; four per Race, with the player's the boldest.
+_Avoid_: color, skin, paint job
+
+**Terrain Zone**:
+An authored ground patch such as sand or mowed grass drawn beneath the Track for scenery; never affects handling.
+_Avoid_: background, biome, texture
+
 **Race**:
 3 laps, you plus 3 AI cars, with live positions and best lap shown.
 _Avoid_: match, round, heat
