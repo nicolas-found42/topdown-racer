@@ -32,7 +32,17 @@ pub fn format_results(snaps: &[CarSnapshot]) -> Vec<ResultRow> {
             let lap_times = snap
                 .lap_times
                 .iter()
-                .map(|t| format_opt_lap_time(*t))
+                .enumerate()
+                .map(|(i, t)| {
+                    let time = format_opt_lap_time(*t);
+                    if snap.lap_invalidated[i] {
+                        format!("{time} RECOVERED")
+                    } else if snap.lap_assisted[i] {
+                        format!("{time} AUTO")
+                    } else {
+                        time
+                    }
+                })
                 .collect();
             let best_lap = format_opt_lap_time(snap.best_lap_time);
             ResultRow {
@@ -50,7 +60,18 @@ pub fn format_results(snaps: &[CarSnapshot]) -> Vec<ResultRow> {
 pub struct ResultsUi;
 
 /// Spawns the results screen from simulation snapshots.
-pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
+pub fn spawn_results_ui(
+    mut commands: Commands,
+    shell: Res<ShellSimulation>,
+    records: Option<Res<crate::records::LocalRecords>>,
+) {
+    let notice = records
+        .as_ref()
+        .map_or("", |records| records.notice.as_str());
+    if shell.practice.is_some() {
+        crate::practice::spawn_results(&mut commands, &shell, notice);
+        return;
+    }
     let rows = format_results(&shell.curr_snapshots);
     spawn_overlay_root(&mut commands, 8.0, 0.94)
         .insert(ResultsUi)
@@ -63,13 +84,29 @@ pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
                     ..default()
                 },
             ));
+            results.spawn(TextBundle::from_section(
+                crate::menu::driving_summary(&shell),
+                TextStyle {
+                    font_size: 18.0,
+                    color: Color::srgb(1.0, 0.85, 0.3),
+                    ..default()
+                },
+            ));
+            if !notice.is_empty() { results.spawn(TextBundle::from_section(notice, TextStyle { font_size: 16.0, color: Color::WHITE, ..default() })); }
             for row in &rows {
                 let laps = row.lap_times.join("  ");
+                let snap = &shell.curr_snapshots[row.car_number - 1];
+                let status = match snap.finish_status {
+                    topdown_racer_core::simulation::FinishStatus::Dnf => "DNF".to_owned(),
+                    _ => ordinal(row.position),
+                };
                 results.spawn(TextBundle::from_section(
                     format!(
-                        "{} — Car {} — {} — Best {}",
-                        ordinal(row.position),
+                        "{} - {}Car {} - {}/3 laps - {} - Best {}",
+                        status,
+                        if row.car_number == 1 { "YOU / " } else { "" },
                         row.car_number,
+                        snap.completed_laps,
                         laps,
                         row.best_lap
                     ),
@@ -80,6 +117,10 @@ pub fn spawn_results_ui(mut commands: Commands, shell: Res<ShellSimulation>) {
                     },
                 ));
             }
+            results.spawn(TextBundle::from_section(
+                "Lap 1: standing start (Race time only). AUTO / RECOVERED: ineligible for a Manual record.",
+                TextStyle { font_size: 16.0, color: Color::WHITE, ..default() },
+            ));
             results.spawn(TextBundle::from_section(
                 "Press R to restart, ESC for menu",
                 TextStyle {
@@ -110,6 +151,15 @@ mod tests {
         snap.best_lap_time = best_lap_time;
         snap.phase = topdown_racer_core::simulation::RacePhase::Finished;
         snap
+    }
+
+    #[test]
+    fn assisted_lap_stays_labelled_in_manual_results() {
+        let mut snap = results_snapshot(1, [Some(25.0), Some(24.0), None], Some(24.0));
+        snap.lap_assisted[0] = true;
+        let rows = format_results(&[snap]);
+        assert!(rows[0].lap_times[0].contains("AUTO"));
+        assert!(!rows[0].lap_times[1].contains("AUTO"));
     }
 
     #[test]

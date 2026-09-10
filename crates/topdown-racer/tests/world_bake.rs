@@ -36,13 +36,13 @@ fn grass_canvas_covers_the_fixed_camera_view_at_outer_track_bounds() {
     )
     .unwrap();
     let canvas = bake_world(&build_track_geometry(&track), track.theme);
-    // A Car at the right-hand wall can look 40 units farther right. Include
+    // A Car at the right-hand wall can look 50 units farther right (including maximum camera lead). Include
     // half a texel of slack for the camera's world-grid snapping.
     assert!(canvas
-        .sample_world(glam::Vec2::new(152.0625, 30.0))
+        .sample_world(glam::Vec2::new(162.0625, 30.0))
         .is_some());
     assert!(canvas
-        .sample_world(glam::Vec2::new(-52.0625, 30.0))
+        .sample_world(glam::Vec2::new(-62.0625, 30.0))
         .is_some());
 }
 

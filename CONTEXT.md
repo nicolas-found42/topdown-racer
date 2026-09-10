@@ -35,3 +35,24 @@ _Avoid_: bot, NPC, ghost
 **Drift**:
 Controlled lateral slip from the grip model, distinct from uncontrolled wall-slide.
 _Avoid_: skid, slide, powerslide
+
+
+**Finish Gate**:
+The directional line across the Track shared by the painted checker and lap completion. A crossing counts only after the ordered route is complete.
+_Avoid_: finish radius, proximity finish
+
+**Eligible Flying Lap**:
+A complete lap after the standing-start lap, driven entirely in Manual without recovery. Its personal best belongs to the same Track, handling rules, and steering response.
+_Avoid_: unrestricted best, assisted record
+
+**Recovery**:
+A low-speed return to a clear road position behind validated progress, making the current lap ineligible without granting progress or an improved position.
+_Avoid_: rewind, shortcut, repair
+
+**Corner Practice**:
+A single-Car challenge through one authored Hillside braking and direction-change sequence, comparing section time and exit speed from repeatable starting conditions.
+_Avoid_: Race, time-trial career
+
+**Practice Attempt**:
+One traversal of the Corner Practice section from its approach gate to its exit gate. Assistance, recovery, reverse gate crossings, skipped gates, and leaving the Track make it ineligible.
+_Avoid_: lap, Race result

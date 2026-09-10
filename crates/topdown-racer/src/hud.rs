@@ -66,7 +66,8 @@ pub(crate) fn setup_hud(mut commands: Commands) {
                     width: Val::Percent(100.0),
                     height: Val::Percent(100.0),
                     position_type: PositionType::Absolute,
-                    justify_content: JustifyContent::SpaceBetween,
+                    justify_content: JustifyContent::FlexStart,
+                    row_gap: Val::Px(8.0),
                     flex_direction: FlexDirection::Column,
                     padding: UiRect::all(Val::Px(16.0)),
                     ..default()
@@ -77,6 +78,12 @@ pub(crate) fn setup_hud(mut commands: Commands) {
             HudRoot,
         ))
         .with_children(|root| {
+            root.spawn(TextBundle::from_section("T: toggle mode  |  W/S: throttle / brake + reverse  |  A/D: steer  |  Space: handbrake", TextStyle {
+                font_size: 14.0, color: Color::WHITE, ..default()
+            }));
+            root.spawn((TextBundle::from_section("", TextStyle {
+                font_size: 18.0, color: Color::srgb(1.0, 0.85, 0.3), ..default()
+            }), crate::menu::DrivingSummary));
             // Top bar
             root.spawn(NodeBundle {
                 style: Style {
@@ -134,6 +141,7 @@ pub(crate) fn setup_hud(mut commands: Commands) {
                 style: Style {
                     width: Val::Percent(100.0),
                     justify_content: JustifyContent::FlexEnd,
+                    margin: UiRect::top(Val::Auto),
                     ..default()
                 },
                 ..default()
@@ -178,7 +186,13 @@ pub(crate) fn update_hud(
     let Some(player_snap) = shell.curr_snapshots.first() else {
         return;
     };
-    let hud = format_hud_data(player_snap, shell.curr_snapshots.len());
+    let mut hud = format_hud_data(player_snap, shell.curr_snapshots.len());
+    if let Some(attempt) = &shell.practice {
+        hud.lap = "CORNER PRACTICE".into();
+        hud.position = "One Car | cyan entry, white exit".into();
+        hud.current_lap_time = format!("SECTION {:.3}s", attempt.elapsed());
+        hud.best_lap_time = format!("TARGET {}", format_opt_lap_time(shell.practice_baseline));
+    }
 
     for (element, mut text) in hud_query.iter_mut() {
         match element {
@@ -249,11 +263,17 @@ pub(crate) fn update_countdown_overlay(
     shell: Res<ShellSimulation>,
     mut countdown_q: Query<&mut Text, With<CountdownText>>,
 ) {
-    let text = match shell.sim.phase() {
-        // Clear the green flash once the race is underway (time since green,
-        // not the per-lap timer which resets at every lap line).
-        RacePhase::Racing if shell.sim.racing_ticks() as f32 * FIXED_DT > 2.0 => "",
-        phase => countdown_display(phase),
+    let text = if shell.sim.is_paused() {
+        ""
+    } else if shell.sim.preparation_ticks() > 0 {
+        "READY"
+    } else {
+        match shell.sim.phase() {
+            // Clear the green flash once the race is underway (time since green,
+            // not the per-lap timer which resets at every lap line).
+            RacePhase::Racing if shell.sim.racing_ticks() as f32 * FIXED_DT > 2.0 => "",
+            phase => countdown_display(phase),
+        }
     };
     for mut t in countdown_q.iter_mut() {
         t.sections[0].value = text.to_owned();
@@ -266,6 +286,16 @@ pub(crate) fn sample_snapshot() -> CarSnapshot {
     use topdown_racer_core::simulation::RacePhase;
     use topdown_racer_core::track::Surface;
     CarSnapshot {
+        current_lap_invalidated: false,
+        lap_invalidated: [false; 3],
+        finish_status: Default::default(),
+        finish_window_ticks: None,
+        driving_mode: Default::default(),
+        current_lap_assisted: false,
+        lap_assisted: [false; 3],
+        best_manual_lap_time: None,
+        car_contact: false,
+        car_contact_speed: 0.0,
         pose: Vec2::ZERO,
         heading: 0.0,
         velocity: Vec2::ZERO,

@@ -4,6 +4,29 @@ use serde::Deserialize;
 /// The bundled sample circuit, shipped as a real data file so every later
 /// ticket has something concrete to load.
 pub const SAMPLE_CIRCUIT: &str = include_str!("../data/tracks/sample-circuit.json");
+pub const HILLSIDE_CIRCUIT: &str = include_str!("../data/tracks/hillside-circuit.json");
+
+/// Shared timing and presentation geometry for a directional road gate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DirectionalGate {
+    pub center: Vec2,
+    pub direction: Vec2,
+    pub half_width: f32,
+}
+
+impl DirectionalGate {
+    /// Swept forward crossing, bounded at the intersection with the gate plane.
+    pub fn crossed(self, previous: Vec2, current: Vec2) -> bool {
+        let before = (previous - self.center).dot(self.direction);
+        let after = (current - self.center).dot(self.direction);
+        if before > 0.0 || after <= 0.0 || after <= before {
+            return false;
+        }
+        let intersection = previous.lerp(current, -before / (after - before));
+        let normal = Vec2::new(-self.direction.y, self.direction.x);
+        (intersection - self.center).dot(normal).abs() <= self.half_width
+    }
+}
 
 /// A parsed closed circuit: center polyline, per-vertex width ramp, and
 /// one surface per polyline segment.
@@ -205,6 +228,8 @@ pub enum TrackParseError {
     UnclosedLoop { first: [f32; 2], last: [f32; 2] },
     /// Fewer than 3 distinct vertices; not a closed circuit.
     TooFewPoints(usize),
+    /// Consecutive vertices coincide, leaving no direction for this segment.
+    ZeroLengthSegment { segment: usize },
     /// Width is zero or negative; a road needs positive width.
     InvalidWidth(f32),
     /// A `widths` array whose entry count differs from the points count;
@@ -262,6 +287,10 @@ impl std::fmt::Display for TrackParseError {
             TrackParseError::TooFewPoints(count) => write!(
                 f,
                 "closed track needs at least 3 distinct points, got {count}"
+            ),
+            TrackParseError::ZeroLengthSegment { segment } => write!(
+                f,
+                "track segment {segment} has zero length; consecutive vertices must differ"
             ),
             TrackParseError::InvalidWidth(width) => {
                 write!(f, "track width must be positive, got {width}")
@@ -508,6 +537,11 @@ impl Track {
         // so the documented last-equals-first invariant holds exactly.
         let closing = points[0];
         *points.last_mut().unwrap() = closing;
+        for (segment, pair) in points.windows(2).enumerate() {
+            if pair[0] == pair[1] {
+                return Err(TrackParseError::ZeroLengthSegment { segment });
+            }
+        }
 
         // Resolve per-vertex widths: an authored `widths` array wins and a
         // co-authored global `width` is ignored; otherwise the global width
@@ -622,6 +656,19 @@ impl Track {
         (0..self.start_segment)
             .map(|i| self.points[i].distance(self.points[i + 1]))
             .sum()
+    }
+
+    /// The checker center sits beyond the start vertex's corner exit.
+    pub fn finish_gate(&self) -> DirectionalGate {
+        let s = self.start_segment;
+        let segment = self.points[s + 1] - self.points[s];
+        let distance = (self.widths[s] * 0.5 + 3.0).min(segment.length() * 0.5);
+        let direction = segment.normalize();
+        DirectionalGate {
+            center: self.points[s] + direction * distance,
+            direction,
+            half_width: self.road_half_width_at_arc(self.start_arc() + distance),
+        }
     }
 
     /// Returns a world point `distance` units back along the polyline from

@@ -38,8 +38,8 @@ use crate::track_geometry::{Quad, TrackRenderGeometry};
 pub const TEXELS_PER_UNIT: f32 = 8.0;
 
 /// Grass margin around geometry bounds: covers the fixed camera's
-/// 40-unit half-width, with slack for camera snapping and wall correction.
-pub const CANVAS_MARGIN_UNITS: f32 = 48.0;
+/// 40-unit half-width plus 10-unit lead, with slack for snapping and walls.
+pub const CANVAS_MARGIN_UNITS: f32 = 60.0;
 
 /// Height of one mowing band on the grass field, in world units.
 const MOWING_BAND_UNITS: f32 = 8.0;
@@ -383,10 +383,10 @@ mod tests {
     #[test]
     fn canvas_covers_geometry_with_margin_at_native_density() {
         let canvas = bake_world(&flat_road_geometry(), Theme::Hillside);
-        // Bounding box [-48, 50]^2 (2x2 quad + 48-unit margin), 8 texels
+        // Bounding box [-60, 62]^2 (2x2 quad + 60-unit margin), 8 texels
         // per unit.
-        assert_eq!((canvas.width, canvas.height), (784, 784));
-        assert_eq!(canvas.world_origin(), Vec2::new(-48.0, -48.0));
+        assert_eq!((canvas.width, canvas.height), (976, 976));
+        assert_eq!(canvas.world_origin(), Vec2::new(-60.0, -60.0));
         // Texel <-> world round-trips inside half a texel.
         let world = Vec2::new(1.0, 1.0);
         let (px, py) = canvas.texel_of(world).unwrap();
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn grass_field_bands_and_dither() {
         let canvas = bake_world(&flat_road_geometry(), Theme::Hillside);
-        // Origin (-48,-48) puts texel centers on -48 + odd/16, so these
+        // Origin (-60,-60) puts texel centers on -60 + odd/16, so these
         // hand-picked samples miss the speckle lattice (Bayer >= 2) and
         // pin the raw band colors: bands 8 units tall along world Y.
         assert_eq!(
@@ -429,7 +429,7 @@ mod tests {
            // Dither: any 4x4 texel window inside one band holds exactly two
            // speckle texels (the lattice's two lowest cells) tinted with the
            // band's light color, the rest the band base.
-        let (px0, py0) = (8, 200); // rows 200..=203 all inside the band -1 stretch
+        let (px0, py0) = canvas.texel_of(Vec2::new(-16.0, -4.0)).unwrap(); // entirely inside band -1
         let (mut speckle, mut base) = (0, 0);
         for py in py0..py0 + 4 {
             for px in px0..px0 + 4 {
