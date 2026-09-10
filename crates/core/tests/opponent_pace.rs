@@ -1,9 +1,17 @@
-use topdown_racer_core::{ai::{AiDriver, OpponentPace}, simulation::{Sim, RacePhase}, track::{Track, SAMPLE_CIRCUIT}};
+use topdown_racer_core::{
+    ai::{AiDriver, OpponentPace},
+    simulation::{RacePhase, Sim},
+    track::{Track, SAMPLE_CIRCUIT},
+};
 
 #[test]
 fn repeated_clean_solo_runs_order_the_three_paces() {
     let mut times = Vec::new();
-    for pace in [OpponentPace::Touring, OpponentPace::Club, OpponentPace::Race] {
+    for pace in [
+        OpponentPace::Touring,
+        OpponentPace::Club,
+        OpponentPace::Race,
+    ] {
         let mut runs = Vec::new();
         for _ in 0..2 {
             let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 1);

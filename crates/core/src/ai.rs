@@ -25,7 +25,11 @@ pub enum OpponentPace {
 
 impl OpponentPace {
     pub fn label(self) -> &'static str {
-        match self { Self::Touring => "TOURING", Self::Club => "CLUB", Self::Race => "RACE" }
+        match self {
+            Self::Touring => "TOURING",
+            Self::Club => "CLUB",
+            Self::Race => "RACE",
+        }
     }
     pub fn description(self) -> &'static str {
         match self {
@@ -35,13 +39,19 @@ impl OpponentPace {
         }
     }
     fn speed_factor(self) -> f32 {
-        match self { Self::Touring => 0.70, Self::Club => 0.85, Self::Race => 1.0 }
+        match self {
+            Self::Touring => 0.70,
+            Self::Club => 0.85,
+            Self::Race => 1.0,
+        }
     }
 }
 
 /// Perception handed to a driver once per tick: everything a cockpit view
 /// would show — own state, the Track, and every Car in the field.
 pub struct AiView<'a> {
+    /// Optional participation mask; omitted means every field entry is active.
+    pub active: Option<&'a [bool]>,
     /// Index of the driven Car in `field`.
     pub car_index: usize,
     /// World position of the driven Car.
@@ -54,6 +64,15 @@ pub struct AiView<'a> {
     pub track: &'a Track,
     /// (pose, velocity) of every Car in the field, indexed like the Sim.
     pub field: &'a [(Vec2, Vec2)],
+}
+
+impl AiView<'_> {
+    fn active_rival(&self, index: usize) -> bool {
+        index != self.car_index
+            && self
+                .active
+                .is_none_or(|mask| mask.get(index).copied().unwrap_or(false))
+    }
 }
 
 /// Distance between speed-plan samples along the centerline, in world units.
@@ -164,7 +183,9 @@ impl AiDriver {
         }
     }
 
-    pub fn pass_stats(&self) -> PassStats { self.pass_stats }
+    pub fn pass_stats(&self) -> PassStats {
+        self.pass_stats
+    }
 
     /// Turns one tick of perception into the player-identical [`CarInput`].
     pub fn compute_input(&mut self, view: AiView<'_>) -> CarInput {
@@ -199,11 +220,15 @@ impl AiDriver {
 
         // Stuck detection runs only while racing (the Sim never consults the
         // driver during countdown, so the counter cannot fill at the start).
-        let waiting_for_traffic = !off_track && view.field.iter().enumerate().any(|(j, (pose, velocity))| {
-            let rel = *pose - view.pose;
-            j != view.car_index && rel.dot(fwd) > 5.0 && rel.dot(fwd) < FOLLOW_GAP + 2.0
-                && rel.dot(left).abs() < 3.2 && velocity.dot(fwd) < STUCK_SPEED
-        });
+        let waiting_for_traffic = !off_track
+            && view.field.iter().enumerate().any(|(j, (pose, velocity))| {
+                let rel = *pose - view.pose;
+                view.active_rival(j)
+                    && rel.dot(fwd) > 0.0
+                    && rel.dot(fwd) < FOLLOW_GAP + 2.0
+                    && rel.dot(left).abs() < 3.2
+                    && velocity.dot(fwd) < STUCK_SPEED
+            });
         if vf.abs() < STUCK_SPEED && !waiting_for_traffic {
             self.stuck_ticks += 1;
         } else {
@@ -247,25 +272,35 @@ impl AiDriver {
         };
 
         let lane_clear = |lane: f32| {
-            lane.abs() <= max_offset && !view.field.iter().enumerate().any(|(j, (pose, velocity))| {
-                if j == view.car_index { return false; }
-                let gap = (*pose - view.pose).dot(fwd);
-                let lateral = view.track.centerline_frame(*pose).lateral;
-                let predicted = lateral + velocity.dot(left) * 0.75;
-                (-4.4..AVOID_RANGE).contains(&gap)
-                    && ((lateral - lane).abs() < 3.2 || (predicted - lane).abs() < 3.2)
-            })
+            lane.abs() <= max_offset
+                && !view.field.iter().enumerate().any(|(j, (pose, velocity))| {
+                    if !view.active_rival(j) {
+                        return false;
+                    }
+                    let gap = (*pose - view.pose).dot(fwd);
+                    let lateral = view.track.centerline_frame(*pose).lateral;
+                    let predicted = lateral + velocity.dot(left) * 0.75;
+                    (-4.4..AVOID_RANGE).contains(&gap)
+                        && ((lateral - lane).abs() < 3.2 || (predicted - lane).abs() < 3.2)
+                })
         };
         self.abort_cooldown = self.abort_cooldown.saturating_sub(1);
         if let Some((rival, lane)) = self.pass_target {
             self.pass_ticks += 1;
-            let ahead = view.field.get(rival).map(|(pose, _)| (*pose - view.pose).dot(fwd));
+            let ahead = view
+                .field
+                .get(rival)
+                .filter(|_| view.active_rival(rival))
+                .map(|(pose, _)| (*pose - view.pose).dot(fwd));
             if ahead.is_some_and(|gap| gap < -7.0) {
                 self.pass_stats.completed += 1;
                 self.pass_target = None;
             } else {
                 let blocked = !lane_clear(lane);
-                if blocked || ahead.is_none_or(|gap| gap > AVOID_RANGE + 10.0) || self.pass_ticks > 384 {
+                if blocked
+                    || ahead.is_none_or(|gap| gap > AVOID_RANGE + 10.0)
+                    || self.pass_ticks > 384
+                {
                     self.pass_stats.aborted += 1;
                     self.pass_target = None;
                     self.abort_cooldown = 96;
@@ -277,7 +312,7 @@ impl AiDriver {
         // different line is passed, not queued behind.
         let mut follow_speed = f32::INFINITY;
         for (j, &(other_pose, other_vel)) in view.field.iter().enumerate() {
-            if j == view.car_index {
+            if !view.active_rival(j) {
                 continue;
             }
             let rel = other_pose - view.pose;
@@ -285,21 +320,36 @@ impl AiDriver {
             let lateral = rel.dot(left);
             let future_lateral = lateral + other_vel.dot(left) * 1.5;
             let crossing_corridor = future_lateral.abs() < 3.2 || lateral * future_lateral < 0.0;
-            if ahead <= 0.0 || ahead > AVOID_RANGE || (lateral.abs() > AVOID_LATERAL && !crossing_corridor) {
+            if ahead <= 0.0
+                || ahead > AVOID_RANGE
+                || (lateral.abs() > AVOID_LATERAL && !crossing_corridor)
+            {
                 continue;
             }
             let closing = vf - other_vel.dot(fwd);
 
             // Pass on the side the rival is not occupying; a Car dead ahead
             // or to the left is passed on the right.
-            if self.pass_target.is_none() && self.abort_cooldown == 0 && target_speed - other_vel.dot(fwd) > 0.2 {
+            if self.pass_target.is_none()
+                && self.abort_cooldown == 0
+                && target_speed - other_vel.dot(fwd) > 0.2
+            {
                 let aim_center = view.track.point_at_arc(aim_arc);
-                let aim_direction = (view.track.point_at_arc(aim_arc + 1.0) - aim_center).normalize_or_zero();
-                let own_aim_lateral = (view.pose - aim_center).dot(Vec2::new(-aim_direction.y, aim_direction.x));
+                let aim_direction =
+                    (view.track.point_at_arc(aim_arc + 1.0) - aim_center).normalize_or_zero();
+                let own_aim_lateral =
+                    (view.pose - aim_center).dot(Vec2::new(-aim_direction.y, aim_direction.x));
                 let side = if vf < 6.0 && own_aim_lateral.abs() > 1.0 {
                     own_aim_lateral.signum()
-                } else if lateral < -0.5 { 1.0 } else { -1.0 };
-                for candidate in [side * AVOID_SHIFT.min(max_offset), -side * AVOID_SHIFT.min(max_offset)] {
+                } else if lateral < -0.5 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for candidate in [
+                    side * AVOID_SHIFT.min(max_offset),
+                    -side * AVOID_SHIFT.min(max_offset),
+                ] {
                     if lane_clear(candidate) {
                         self.pass_target = Some((j, candidate));
                         self.pass_ticks = 0;
@@ -315,26 +365,40 @@ impl AiDriver {
             if same_corridor && closing > 0.2 {
                 let gap = (ahead - FOLLOW_GAP - (1.0 - self.aggression) * 2.0).max(0.0);
                 let safe_speed = (other_vel.dot(fwd).max(0.0).powi(2)
-                    + 2.0 * BRAKE_ACCEL * PLAN_BRAKE_FRACTION * gap).sqrt();
-                follow_speed = follow_speed.min(if self.pass_target.is_some() { safe_speed.max(2.0) } else { safe_speed });
+                    + 2.0 * BRAKE_ACCEL * PLAN_BRAKE_FRACTION * gap)
+                    .sqrt();
+                follow_speed = follow_speed.min(if self.pass_target.is_some() {
+                    safe_speed.max(2.0)
+                } else {
+                    safe_speed
+                });
             }
-            if same_corridor && (ahead < FOLLOW_GAP + (1.0 - self.aggression) * 2.0 || self.abort_cooldown > 0) {
+            if same_corridor
+                && (ahead < FOLLOW_GAP + (1.0 - self.aggression) * 2.0 || self.abort_cooldown > 0)
+            {
                 let creep = if self.pass_target.is_some() { 2.0 } else { 0.0 };
                 follow_speed = follow_speed.min(other_vel.dot(fwd).max(creep));
             }
         }
-        if let Some((_, lane)) = self.pass_target { offset = lane; }
+        if let Some((_, lane)) = self.pass_target {
+            offset = lane;
+        }
         // Established overlap reserves a Car-width corridor plus 0.6 units.
         // No defensive move may cross that corridor, including at turn-in.
         let mut lane_min = -max_offset;
         let mut lane_max = max_offset;
         for (j, &(pose, _)) in view.field.iter().enumerate() {
-            if j == view.car_index { continue; }
+            if !view.active_rival(j) {
+                continue;
+            }
             let gap = (pose - view.pose).dot(frame.direction);
             let lateral = view.track.centerline_frame(pose).lateral;
             if gap.abs() <= 4.41 && (lateral - frame.lateral).abs() > 0.5 {
-                if lateral > frame.lateral { lane_max = lane_max.min(lateral - 3.2); }
-                else { lane_min = lane_min.max(lateral + 3.2); }
+                if lateral > frame.lateral {
+                    lane_max = lane_max.min(lateral - 3.2);
+                } else {
+                    lane_min = lane_min.max(lateral + 3.2);
+                }
             }
         }
         if lane_min <= lane_max {
@@ -446,6 +510,7 @@ mod tests {
         field: &'a [(Vec2, Vec2)],
     ) -> AiView<'a> {
         AiView {
+            active: None,
             car_index: 0,
             pose,
             heading,

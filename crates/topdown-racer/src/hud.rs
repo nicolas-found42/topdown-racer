@@ -186,7 +186,13 @@ pub(crate) fn update_hud(
     let Some(player_snap) = shell.curr_snapshots.first() else {
         return;
     };
-    let hud = format_hud_data(player_snap, shell.curr_snapshots.len());
+    let mut hud = format_hud_data(player_snap, shell.curr_snapshots.len());
+    if let Some(attempt) = &shell.practice {
+        hud.lap = "CORNER PRACTICE".into();
+        hud.position = "One Car | cyan entry, white exit".into();
+        hud.current_lap_time = format!("SECTION {:.3}s", attempt.elapsed());
+        hud.best_lap_time = format!("TARGET {}", format_opt_lap_time(shell.practice_baseline));
+    }
 
     for (element, mut text) in hud_query.iter_mut() {
         match element {
@@ -257,11 +263,17 @@ pub(crate) fn update_countdown_overlay(
     shell: Res<ShellSimulation>,
     mut countdown_q: Query<&mut Text, With<CountdownText>>,
 ) {
-    let text = match shell.sim.phase() {
-        // Clear the green flash once the race is underway (time since green,
-        // not the per-lap timer which resets at every lap line).
-        RacePhase::Racing if shell.sim.racing_ticks() as f32 * FIXED_DT > 2.0 => "",
-        phase => countdown_display(phase),
+    let text = if shell.sim.is_paused() {
+        ""
+    } else if shell.sim.preparation_ticks() > 0 {
+        "READY"
+    } else {
+        match shell.sim.phase() {
+            // Clear the green flash once the race is underway (time since green,
+            // not the per-lap timer which resets at every lap line).
+            RacePhase::Racing if shell.sim.racing_ticks() as f32 * FIXED_DT > 2.0 => "",
+            phase => countdown_display(phase),
+        }
     };
     for mut t in countdown_q.iter_mut() {
         t.sections[0].value = text.to_owned();
@@ -274,6 +286,10 @@ pub(crate) fn sample_snapshot() -> CarSnapshot {
     use topdown_racer_core::simulation::RacePhase;
     use topdown_racer_core::track::Surface;
     CarSnapshot {
+        current_lap_invalidated: false,
+        lap_invalidated: [false; 3],
+        finish_status: Default::default(),
+        finish_window_ticks: None,
         driving_mode: Default::default(),
         current_lap_assisted: false,
         lap_assisted: [false; 3],

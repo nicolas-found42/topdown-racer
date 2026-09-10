@@ -156,6 +156,8 @@ pub fn setup_audio(mut commands: Commands, mut audio_sources: ResMut<Assets<Audi
 /// yields no entities, so this system executes cleanly without error.
 pub fn update_audio(
     shell: Res<ShellSimulation>,
+    feedback: Option<Res<crate::feedback::FeedbackState>>,
+    volume: Option<Res<crate::feedback::EffectsVolume>>,
     engine_q: Query<&AudioSink, With<EngineAudio>>,
     skid_q: Query<&AudioSink, With<SkidAudio>>,
 ) {
@@ -164,12 +166,34 @@ pub fn update_audio(
     };
 
     let cue = audio_cue_from_snapshot(player_snap);
+    let level = volume.as_ref().map_or(1.0, |v| v.0);
+    let engine_volume = feedback
+        .as_ref()
+        .map_or(DEFAULT_ENGINE_VOLUME, |f| f.frame.engine_volume)
+        * level;
+    let tire_volume = feedback
+        .as_ref()
+        .map_or(cue.skid_volume, |f| f.frame.tire_volume)
+        * level;
 
     for sink in engine_q.iter() {
         sink.set_speed(cue.pitch);
+        sink.set_volume(
+            if shell.sim.is_paused() || shell.sim.preparation_ticks() > 0 {
+                0.0
+            } else {
+                engine_volume
+            },
+        );
     }
     for sink in skid_q.iter() {
-        sink.set_volume(cue.skid_volume);
+        sink.set_volume(
+            if shell.sim.is_paused() || shell.sim.preparation_ticks() > 0 {
+                0.0
+            } else {
+                tire_volume
+            },
+        );
     }
 }
 

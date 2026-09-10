@@ -1,15 +1,22 @@
 //! Shell library for Topdown Racer: camera, rendering, and simulation glue.
 
 mod audio;
+pub mod awareness;
 mod best_lap;
 mod camera;
 mod capture;
+pub mod controls;
+pub mod effects;
+pub mod feedback;
 mod fmt;
 mod hud;
+pub mod lifecycle;
 mod menu;
 mod overlay;
 pub mod palette;
+pub mod practice;
 mod race;
+pub mod records;
 mod results;
 mod track_geometry;
 pub mod world_bake;
@@ -43,7 +50,7 @@ use bevy::prelude::*;
 use glam::Vec2;
 use topdown_racer_core::{
     simulation::{CarInput, CarSnapshot, Sim, FIXED_HZ},
-    track::{PropKind, Track, SAMPLE_CIRCUIT},
+    track::{PropKind, Track},
 };
 
 use audio::setup_audio;
@@ -96,6 +103,13 @@ pub const TOTAL_RACE_CARS: usize = 4;
 /// Resource holding simulation state and consecutive snapshots for render interpolation.
 #[derive(Resource)]
 pub struct ShellSimulation {
+    pub practice_selected: bool,
+    pub race_mode_before_practice: topdown_racer_core::simulation::DrivingMode,
+    pub practice: Option<topdown_racer_core::practice::PracticeAttempt>,
+    pub practice_baseline: Option<f32>,
+    pub camera_mode: awareness::CameraMode,
+    pub generation: u64,
+    pub steering_response: controls::SteeringResponse,
     pub selected_pace: topdown_racer_core::ai::OpponentPace,
     pub sim: Sim,
     pub prev_snapshots: Vec<CarSnapshot>,
@@ -110,6 +124,13 @@ impl ShellSimulation {
     fn from_sim(sim: Sim) -> Self {
         let initial = sim.snapshots();
         Self {
+            practice_selected: false,
+            race_mode_before_practice: Default::default(),
+            practice: None,
+            practice_baseline: None,
+            camera_mode: Default::default(),
+            generation: 0,
+            steering_response: Default::default(),
             selected_pace: sim.opponent_pace(),
             sim,
             prev_snapshots: initial.clone(),
@@ -122,12 +143,32 @@ impl ShellSimulation {
     pub fn reset_to_fresh_race(&mut self) {
         let track = self.sim.track().clone();
         let mode = self.sim.player_mode();
+        let response = self.steering_response;
+        let camera_mode = self.camera_mode;
+        let generation = self.generation + 1;
+        let practice_selected = self.practice_selected;
+        let race_mode_before_practice = self.race_mode_before_practice;
         *self = Self::from_sim(Sim::new_race_with_pace(
             track,
             TOTAL_RACE_CARS,
             self.selected_pace,
         ));
         self.sim.request_player_mode(mode);
+        self.steering_response = response;
+        self.camera_mode = camera_mode;
+        self.generation = generation;
+        self.practice_selected = practice_selected;
+        self.race_mode_before_practice = race_mode_before_practice;
+        if practice_selected {
+            let challenge =
+                topdown_racer_core::practice::CornerChallenge::hillside(self.sim.track());
+            self.sim = challenge.start(self.sim.track().clone());
+            self.curr_snapshots = self.sim.snapshots();
+            self.prev_snapshots = self.curr_snapshots.clone();
+            self.practice = Some(topdown_racer_core::practice::PracticeAttempt::new(
+                challenge,
+            ));
+        }
     }
 }
 
@@ -136,16 +177,23 @@ pub struct RacerGamePlugin;
 
 impl Plugin for RacerGamePlugin {
     fn build(&self, app: &mut App) {
-        let track = Track::parse(SAMPLE_CIRCUIT).expect("sample circuit must parse");
+        let track = Track::parse(topdown_racer_core::track::HILLSIDE_CIRCUIT)
+            .expect("bundled hillside circuit must parse");
         let auto_start = std::env::var("TOPDOWN_AUTO_START").as_deref() == Ok("1");
         let capture_frames = std::env::var("TOPDOWN_CAPTURE").as_deref() == Ok("1");
         app.insert_resource(Msaa::Off)
             .add_plugins(RaceLifecyclePlugin)
+            .add_plugins(effects::EffectsPlugin)
+            .add_plugins(awareness::AwarenessPlugin)
+            .add_plugins(practice::PracticePlugin)
+            .add_plugins(feedback::FeedbackPlugin)
             .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ as f64))
             .insert_resource(ShellSimulation::new(track))
-            .insert_resource(SavedBestLap(load_best_lap(&default_best_lap_path())))
+            .init_resource::<SavedBestLap>()
+            .init_resource::<records::LocalRecords>()
             .init_resource::<PlayerInput>()
             .init_resource::<ControlGate>()
+            .init_resource::<controls::SteeringFilter>()
             .insert_resource(FrameCapture {
                 active: capture_frames,
                 ..default()
@@ -162,12 +210,7 @@ impl Plugin for RacerGamePlugin {
             .add_systems(OnEnter(AppState::Race), (show_hud, unmute_audio))
             .add_systems(
                 OnEnter(AppState::Results),
-                (
-                    spawn_results_ui,
-                    hide_hud,
-                    persist_best_lap_on_finish,
-                    mute_audio,
-                ),
+                (spawn_results_ui, hide_hud, mute_audio),
             )
             .add_systems(OnExit(AppState::Results), despawn_screens)
             .add_systems(
@@ -182,13 +225,15 @@ impl Plugin for RacerGamePlugin {
             )
             .add_systems(
                 FixedUpdate,
-                step_simulation.run_if(in_state(AppState::Race)),
+                (step_simulation, records::persist_completed_laps)
+                    .chain()
+                    .run_if(in_state(AppState::Race)),
             )
             .add_systems(
                 Update,
                 (
                     update_letterbox,
-                    scale_ui_to_window,
+                    scale_ui_to_window.after(update_letterbox),
                     menu::update_driving_summary,
                     interpolate_car_and_camera.run_if(in_state(AppState::Race)),
                     update_front_wheel_steer.run_if(in_state(AppState::Race)),
@@ -294,6 +339,21 @@ fn setup_car(mut commands: Commands, asset_server: Res<AssetServer>, sim: Res<Sh
                 CarSprite { car_index: i },
             ))
             .with_children(|car| {
+                for side in [-1.0, 1.0] {
+                    car.spawn((
+                        SpriteBundle {
+                            sprite: Sprite {
+                                color: palette::color(palette::BRAKELIGHT_RED),
+                                custom_size: Some(Vec2::new(0.25, 0.375)),
+                                ..default()
+                            },
+                            transform: Transform::from_xyz(-1.625, side * 0.625, 0.05),
+                            visibility: Visibility::Hidden,
+                            ..default()
+                        },
+                        effects::BrakeLight(i),
+                    ));
+                }
                 // Body Car Sprite, authored at native density (4.2 x 2.0
                 // world units); rear wheels and wing are baked into the art.
                 car.spawn(SpriteBundle {
@@ -375,6 +435,7 @@ pub fn read_keyboard_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut player_input: ResMut<PlayerInput>,
     mut gate: ResMut<ControlGate>,
+    mut steering: ResMut<controls::SteeringFilter>,
 ) {
     let up = keyboard.any_pressed([KeyCode::ArrowUp, KeyCode::KeyW]);
     let down = keyboard.any_pressed([KeyCode::ArrowDown, KeyCode::KeyS]);
@@ -385,15 +446,51 @@ pub fn read_keyboard_input(
     if gate.0 && !(up || down || left || right || handbrake) {
         gate.0 = false;
     }
+    if gate.0 || (left && right) {
+        steering.reset();
+    }
     player_input.0 = if gate.0 { CarInput::default() } else { input };
 }
 
 /// Fixed step system: advances the simulation at 64 Hz using mapped player
 /// inputs. Cars with an AI driver compute their own input unless the player
 /// overrides it for that tick.
-fn step_simulation(mut shell: ResMut<ShellSimulation>, player_input: Res<PlayerInput>) {
+fn step_simulation(
+    mut shell: ResMut<ShellSimulation>,
+    player_input: Res<PlayerInput>,
+    mut steering: ResMut<controls::SteeringFilter>,
+) {
+    if shell.practice.as_ref().is_some_and(|a| {
+        matches!(
+            a.status(),
+            topdown_racer_core::practice::PracticeStatus::Finished { .. }
+                | topdown_racer_core::practice::PracticeStatus::Invalid(_)
+        )
+    }) {
+        return;
+    }
+    if shell.sim.is_paused() || shell.sim.preparation_ticks() > 0 {
+        steering.reset();
+        shell.prev_snapshots = shell.curr_snapshots.clone();
+        shell.curr_snapshots = shell.sim.tick(&[]);
+        return;
+    }
+    let mut input = player_input.0;
+    if shell.sim.player_mode() == topdown_racer_core::simulation::DrivingMode::Manual {
+        input.steer = steering.step(input.steer, shell.steering_response);
+    } else {
+        steering.reset();
+    }
     shell.prev_snapshots = shell.curr_snapshots.clone();
-    shell.curr_snapshots = shell.sim.tick(&[player_input.0]);
+    shell.curr_snapshots = shell.sim.tick(&[input]);
+    if let (Some(previous), Some(current)) = (
+        shell.prev_snapshots.first().copied(),
+        shell.curr_snapshots.first().copied(),
+    ) {
+        if let Some(attempt) = &mut shell.practice {
+            attempt.observe(&previous, &current);
+        }
+    }
 }
 
 /// Yaws each front-wheel visual to the interpolated steering demand. The
@@ -424,6 +521,9 @@ pub fn toggle_autopilot_system(
     mut gate: ResMut<ControlGate>,
     mut input: ResMut<PlayerInput>,
 ) {
+    if shell.sim.is_paused() || shell.sim.preparation_ticks() > 0 {
+        return;
+    }
     if keyboard.just_pressed(KeyCode::KeyT) {
         let mode = shell.sim.player_mode().toggled();
         shell.sim.request_player_mode(mode);
@@ -432,9 +532,27 @@ pub fn toggle_autopilot_system(
     }
 }
 
+/// Keep the menus and labels inside the supported 640x360 minimum window.
+fn scale_ui_to_window(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut scale: ResMut<UiScale>,
+    cameras: Query<&Camera, With<FollowCamera>>,
+) {
+    if let Ok(window) = windows.get_single() {
+        let size = cameras
+            .get_single()
+            .ok()
+            .and_then(|camera| camera.viewport.as_ref())
+            .map(|viewport| viewport.physical_size.as_vec2() / window.scale_factor())
+            .unwrap_or(Vec2::new(window.width(), window.height()));
+        scale.0 = (size.x / 960.0).min(size.y / 600.0).clamp(0.25, 1.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use topdown_racer_core::track::SAMPLE_CIRCUIT;
 
     const SAMPLE_TRACK_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -521,6 +639,7 @@ mod tests {
         app.init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<PlayerInput>()
             .init_resource::<ControlGate>()
+            .init_resource::<controls::SteeringFilter>()
             .add_systems(Update, read_keyboard_input);
 
         // Test WASD + Space
@@ -568,6 +687,7 @@ mod tests {
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<PlayerInput>()
             .init_resource::<ControlGate>()
+            .init_resource::<controls::SteeringFilter>()
             .add_systems(
                 Update,
                 (
@@ -902,17 +1022,5 @@ mod tests {
             }
         }
         assert_eq!((bake, scenery), (1, 1), "one bake quad, one tree");
-    }
-}
-
-/// Keep the menus and labels inside the supported 640x360 minimum window.
-fn scale_ui_to_window(
-    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    mut scale: ResMut<UiScale>,
-) {
-    if let Ok(window) = windows.get_single() {
-        scale.0 = (window.width() / 960.0)
-            .min(window.height() / 600.0)
-            .clamp(0.5, 1.0);
     }
 }

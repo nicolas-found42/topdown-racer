@@ -29,9 +29,10 @@ jobs:
         run: cargo test --all-targets --all-features
       - name: Smoke run (bounded)
         run: |
+          cargo build --package topdown-racer
           Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
           sleep 2
-          DISPLAY=:99 cargo run --package topdown-racer > /tmp/topdown-racer-smoke.log 2>&1 &
+          BEVY_ASSET_ROOT="$PWD/crates/topdown-racer" DISPLAY=:99 target/debug/topdown-racer > /tmp/topdown-racer-smoke.log 2>&1 &
           APP_PID=$!
 
           sleep 10
