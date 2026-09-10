@@ -98,7 +98,7 @@ judgment also remain outstanding.
 ## Final validation
 
 `cargo check --workspace --all-targets --all-features`, formatting, Clippy with
-warnings denied, and all 177 workspace tests pass. The final small/tall/minimum
+warnings denied, and all 179 workspace tests pass. The final small/tall/minimum
 window captures verified the menu no longer clips and the actual Car assets
 render in the fixed viewport; the optional overview is hidden at small widths.
 The direct-executable CI smoke run supplies the explicit crate asset root.
@@ -109,3 +109,6 @@ ticks. Rejoin: two attempts, one abort, zero contacts/severity, 150 near-rival
 ticks. Narrow following: no pass attempts, zero contacts/severity, 300 near-rival
 ticks and 9.949 units minimum gap. Solo Touring/Club/Race flying laps on the
 controlled Sample Circuit were 33.141 / 28.562 / 25.750 seconds, repeated exactly.
+
+Dedicated finish fixtures additionally verify equal-tick grid-order ties and a
+lapped player taking the flag after the winner without requiring three laps.

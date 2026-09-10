@@ -98,3 +98,104 @@ fn directional_gate_accepts_swept_forward_crossings_only_inside_its_width() {
     assert!(!gate.crossed(Vec2::new(9.0, 6.0), Vec2::new(11.0, 6.0)));
     assert!(!gate.crossed(Vec2::new(9.0, -6.0), Vec2::new(9.0, 6.0)));
 }
+
+#[test]
+fn equal_tick_finish_uses_stable_grid_order() {
+    use topdown_racer_core::{
+        ai::{AiDriver, AiView},
+        simulation::{FinishStatus, GridCar, RacePhase},
+    };
+    let track=Track::parse(r#"{"name":"Wide tie fixture","width":200,"points":[[0,0],[200,0],[200,200],[0,200],[0,0]],"surfaces":[]}"#).unwrap();
+    let mut sim = Sim::from_grid(
+        track.clone(),
+        &[
+            GridCar {
+                pose: Vec2::new(10.0, 0.0),
+                heading: 0.0,
+                velocity: Vec2::ZERO,
+            },
+            GridCar {
+                pose: Vec2::new(10.0, 8.0),
+                heading: 0.0,
+                velocity: Vec2::ZERO,
+            },
+        ],
+    );
+    let mut driver = AiDriver::new(0);
+    for _ in 0..16000 {
+        let previous = sim.snapshots();
+        let car = previous[0];
+        let field = [(car.pose, car.velocity)];
+        let input = driver.compute_input(AiView {
+            active: None,
+            car_index: 0,
+            pose: car.pose,
+            heading: car.heading,
+            velocity: car.velocity,
+            track: &track,
+            field: &field,
+        });
+        let current = sim.tick(&[input, input]);
+        if sim.phase() == RacePhase::Finished {
+            assert_eq!(current[0].completed_laps, 3);
+            assert_eq!(current[1].completed_laps, 3);
+            assert_eq!(current[0].lap_times, current[1].lap_times);
+            assert_eq!(
+                current[0].finish_status,
+                FinishStatus::Finished { place: 1 }
+            );
+            assert_eq!(
+                current[1].finish_status,
+                FinishStatus::Finished { place: 2 }
+            );
+            return;
+        }
+    }
+    panic!("equal-input field must finish");
+}
+
+#[test]
+fn lapped_player_takes_flag_on_next_valid_crossing_after_winner() {
+    use topdown_racer_core::{
+        ai::{AiDriver, AiView},
+        simulation::{FinishStatus, RacePhase},
+    };
+    let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+    let mut sim = Sim::new_race(track.clone(), 2);
+    let mut driver = AiDriver::new(0);
+    let mut winner = false;
+    for _ in 0..14000 {
+        let previous = sim.snapshots();
+        let car = previous[0];
+        let field = [(car.pose, car.velocity)];
+        let mut input = driver.compute_input(AiView {
+            active: None,
+            car_index: 0,
+            pose: car.pose,
+            heading: car.heading,
+            velocity: car.velocity,
+            track: &track,
+            field: &field,
+        });
+        input.throttle = input.throttle.min(0.2);
+        let current = sim.tick(&[input]);
+        winner |= matches!(
+            current[1].finish_status,
+            FinishStatus::Finished { place: 1 }
+        );
+        if matches!(current[0].finish_status, FinishStatus::Finished { .. }) {
+            assert!(winner);
+            assert!(current[0].completed_laps < 3);
+            assert_eq!(current[0].completed_laps, previous[0].completed_laps + 1);
+            assert_eq!(
+                current[0].finish_status,
+                FinishStatus::Finished { place: 2 }
+            );
+            return;
+        }
+        if sim.phase() == RacePhase::Finished {
+            panic!("fixture player must reach gate before DNF expiry");
+        }
+    }
+    panic!("lapped player never classified");
+}

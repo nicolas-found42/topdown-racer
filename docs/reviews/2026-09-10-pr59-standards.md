@@ -6,6 +6,6 @@ Sources: AGENTS.md, docs/agents/domain.md, CONTEXT.md, ADRs 0001–0004, and the
 
 No outstanding documented-standard violations or actionable smell findings identified. Core timing, recovery, and practice remain engine-free; presentation consumes snapshots. The inactive-Car coordinate sentinel was replaced with an explicit participation mask, and duplicated finish-window projection was consolidated. README and the domain documents now describe the actual pause, finish, record, and practice rules.
 
-Formatting, lint, typechecking, and all 177 tests pass. These tool-enforced results are validation evidence, not separate review findings.
+Formatting, lint, typechecking, and all 179 tests pass. These tool-enforced results are validation evidence, not separate review findings.
 
 Standards: 0 outstanding findings.
