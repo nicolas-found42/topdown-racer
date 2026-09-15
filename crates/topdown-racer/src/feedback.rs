@@ -186,7 +186,7 @@ fn apply(
     for (car, mut sprite) in &mut cars {
         sprite.color = if car.car_index == 0
             && feedback.frame.impact_volume > 0.0
-            && *state.get() == crate::AppState::Race
+            && active
         {
             crate::palette::color(crate::palette::RIVAL_ORANGE)
         } else {
