@@ -231,14 +231,11 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
     // past the corner exit: clear of the crossing leg's asphalt, and the
     // whole grid stages behind it.
     if n > 0 {
-        let s = track.start_segment.min(n - 1);
-        let dir = seg_dirs[s];
-        let normal = seg_normals[s];
-        // The line sits just past the corner exit and spans the road width
-        // AT the line's arc, following the ramp.
-        let line_d = half_at[s] + 3.0;
-        let line_center = points[s] + dir * line_d;
-        let half_line = track.road_half_width_at_arc(vertex_arc[s] + line_d);
+        let gate = track.finish_gate();
+        let dir = gate.direction;
+        let normal = Vec2::new(-dir.y, dir.x);
+        let line_center = gate.center;
+        let half_line = gate.half_width;
         let checkers_count = 10;
         let checker_w = (half_line * 2.0) / checkers_count as f32;
         for row in 0..2 {

@@ -10,6 +10,11 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: GAME_TITLE.to_owned(),
+                        resize_constraints: WindowResizeConstraints {
+                            min_width: 640.0,
+                            min_height: 360.0,
+                            ..default()
+                        },
                         ..default()
                     }),
                     ..default()

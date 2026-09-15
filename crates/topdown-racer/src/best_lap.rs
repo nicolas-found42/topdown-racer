@@ -90,8 +90,8 @@ pub fn maybe_save_best_lap(path: &std::path::Path, candidate: f32) -> std::io::R
 /// Formats the menu target line from the saved best lap.
 pub fn format_best_target(saved: Option<f32>) -> String {
     match saved {
-        Some(best) => format!("TARGET TO BEAT — BEST {}", format_time(best)),
-        None => "TARGET TO BEAT — no best lap yet".to_owned(),
+        Some(best) => format!("TARGET TO BEAT - BEST {}", format_time(best)),
+        None => "TARGET TO BEAT - no best lap yet".to_owned(),
     }
 }
 
@@ -100,7 +100,7 @@ pub fn persist_best_lap_on_finish(shell: Res<ShellSimulation>, mut saved: ResMut
     let Some(player_snap) = shell.curr_snapshots.first() else {
         return;
     };
-    if let Some(best) = player_snap.best_lap_time {
+    if let Some(best) = player_snap.best_manual_lap_time {
         match maybe_save_best_lap(&default_best_lap_path(), best) {
             Ok(stored) => saved.0 = stored,
             Err(err) => warn!("failed to persist best lap: {err}"),
@@ -140,9 +140,9 @@ mod tests {
     fn menu_shows_the_saved_best_lap_as_the_target() {
         assert_eq!(
             format_best_target(Some(18.455)),
-            format!("TARGET TO BEAT — BEST {}", format_time(18.455))
+            format!("TARGET TO BEAT - BEST {}", format_time(18.455))
         );
-        assert_eq!(format_best_target(None), "TARGET TO BEAT — no best lap yet");
+        assert_eq!(format_best_target(None), "TARGET TO BEAT - no best lap yet");
     }
 
     #[test]

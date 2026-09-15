@@ -5,3 +5,5 @@
 pub mod ai;
 pub mod simulation;
 pub mod track;
+
+pub mod practice;

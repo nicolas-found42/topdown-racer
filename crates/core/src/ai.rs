@@ -13,9 +13,45 @@ use crate::simulation::{
 };
 use crate::track::{Surface, Track};
 
+/// Fixed driver pace; only the planned speed envelope changes. The slot's
+/// 0.88–1.0 skill variation and 0.5–1.0 aggression are independent of pace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpponentPace {
+    Touring,
+    Club,
+    #[default]
+    Race,
+}
+
+impl OpponentPace {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Touring => "TOURING",
+            Self::Club => "CLUB",
+            Self::Race => "RACE",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Touring => "Lower corner speeds, more time to react",
+            Self::Club => "Moderate speed through corners and straights",
+            Self::Race => "Fastest planned pace, same physical limits",
+        }
+    }
+    fn speed_factor(self) -> f32 {
+        match self {
+            Self::Touring => 0.70,
+            Self::Club => 0.85,
+            Self::Race => 1.0,
+        }
+    }
+}
+
 /// Perception handed to a driver once per tick: everything a cockpit view
 /// would show — own state, the Track, and every Car in the field.
 pub struct AiView<'a> {
+    /// Optional participation mask; omitted means every field entry is active.
+    pub active: Option<&'a [bool]>,
     /// Index of the driven Car in `field`.
     pub car_index: usize,
     /// World position of the driven Car.
@@ -28,6 +64,15 @@ pub struct AiView<'a> {
     pub track: &'a Track,
     /// (pose, velocity) of every Car in the field, indexed like the Sim.
     pub field: &'a [(Vec2, Vec2)],
+}
+
+impl AiView<'_> {
+    fn active_rival(&self, index: usize) -> bool {
+        index != self.car_index
+            && self
+                .active
+                .is_none_or(|mask| mask.get(index).copied().unwrap_or(false))
+    }
 }
 
 /// Distance between speed-plan samples along the centerline, in world units.
@@ -87,6 +132,14 @@ const OFF_TRACK_SPEED_FACTOR: f32 = 0.45;
 const HANDBRAKE_ANGLE: f32 = 1.1;
 const HANDBRAKE_SPEED: f32 = 13.0;
 
+/// Deterministic encounter diagnostics, counted once per committed move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PassStats {
+    pub attempted: u32,
+    pub completed: u32,
+    pub aborted: u32,
+}
+
 /// A decision-making driver producing the same [`CarInput`] controls as the
 /// player. Persistent state is limited to a smoothed line choice, a
 /// stuck/reverse recovery mode, and a deterministic personality.
@@ -98,6 +151,10 @@ pub struct AiDriver {
     aggression: f32,
     /// Smoothed lateral offset the driver has chosen for its line.
     line_offset: f32,
+    pass_target: Option<(usize, f32)>,
+    pass_ticks: u32,
+    abort_cooldown: u32,
+    pass_stats: PassStats,
     /// Consecutive ticks below the stuck speed while demanding drive.
     stuck_ticks: u32,
     /// Remaining ticks in reverse-and-recover mode (0 = normal driving).
@@ -108,14 +165,26 @@ impl AiDriver {
     /// Builds the driver for a grid slot. Personality is a deterministic hash
     /// of the slot: distinct rivals, stable across runs, no rubber-banding.
     pub fn new(car_index: usize) -> Self {
+        Self::with_pace(car_index, OpponentPace::default())
+    }
+
+    pub fn with_pace(car_index: usize, pace: OpponentPace) -> Self {
         let h = (car_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         Self {
-            speed_scale: 0.88 + (h >> 60) as f32 / 15.0 * 0.12,
+            speed_scale: (0.88 + (h >> 60) as f32 / 15.0 * 0.12) * pace.speed_factor(),
             aggression: 0.5 + ((h >> 44) & 0xFFFF) as f32 / 65535.0 * 0.5,
             line_offset: 0.0,
+            pass_target: None,
+            pass_ticks: 0,
+            abort_cooldown: 0,
+            pass_stats: PassStats::default(),
             stuck_ticks: 0,
             reverse_ticks: 0,
         }
+    }
+
+    pub fn pass_stats(&self) -> PassStats {
+        self.pass_stats
     }
 
     /// Turns one tick of perception into the player-identical [`CarInput`].
@@ -151,7 +220,16 @@ impl AiDriver {
 
         // Stuck detection runs only while racing (the Sim never consults the
         // driver during countdown, so the counter cannot fill at the start).
-        if vf.abs() < STUCK_SPEED {
+        let waiting_for_traffic = !off_track
+            && view.field.iter().enumerate().any(|(j, (pose, velocity))| {
+                let rel = *pose - view.pose;
+                view.active_rival(j)
+                    && rel.dot(fwd) > 0.0
+                    && rel.dot(fwd) < FOLLOW_GAP + 2.0
+                    && rel.dot(left).abs() < 3.2
+                    && velocity.dot(fwd) < STUCK_SPEED
+            });
+        if vf.abs() < STUCK_SPEED && !waiting_for_traffic {
             self.stuck_ticks += 1;
         } else {
             self.stuck_ticks = 0;
@@ -193,36 +271,142 @@ impl AiDriver {
                 .clamp(-max_offset, max_offset)
         };
 
+        let lane_clear = |lane: f32| {
+            lane.abs() <= max_offset
+                && !view.field.iter().enumerate().any(|(j, (pose, velocity))| {
+                    if !view.active_rival(j) {
+                        return false;
+                    }
+                    let gap = (*pose - view.pose).dot(fwd);
+                    let lateral = view.track.centerline_frame(*pose).lateral;
+                    let predicted = lateral + velocity.dot(left) * 0.75;
+                    (-4.4..AVOID_RANGE).contains(&gap)
+                        && ((lateral - lane).abs() < 3.2 || (predicted - lane).abs() < 3.2)
+                })
+        };
+        self.abort_cooldown = self.abort_cooldown.saturating_sub(1);
+        if let Some((rival, lane)) = self.pass_target {
+            self.pass_ticks += 1;
+            let ahead = view
+                .field
+                .get(rival)
+                .filter(|_| view.active_rival(rival))
+                .map(|(pose, _)| (*pose - view.pose).dot(fwd));
+            if ahead.is_some_and(|gap| gap < -7.0) {
+                self.pass_stats.completed += 1;
+                self.pass_target = None;
+            } else {
+                let blocked = !lane_clear(lane);
+                if blocked
+                    || ahead.is_none_or(|gap| gap > AVOID_RANGE + 10.0)
+                    || self.pass_ticks > 384
+                {
+                    self.pass_stats.aborted += 1;
+                    self.pass_target = None;
+                    self.abort_cooldown = 96;
+                }
+            }
+        }
         // Traffic decisions: dodge Cars being gained on, and match speed only
         // while physically blocked on the same corridor. A rival on a
         // different line is passed, not queued behind.
         let mut follow_speed = f32::INFINITY;
         for (j, &(other_pose, other_vel)) in view.field.iter().enumerate() {
-            if j == view.car_index {
+            if !view.active_rival(j) {
                 continue;
             }
             let rel = other_pose - view.pose;
             let ahead = rel.dot(fwd);
             let lateral = rel.dot(left);
-            if ahead <= 0.0 || ahead > AVOID_RANGE || lateral.abs() > AVOID_LATERAL {
+            let future_lateral = lateral + other_vel.dot(left) * 1.5;
+            let crossing_corridor = future_lateral.abs() < 3.2 || lateral * future_lateral < 0.0;
+            if ahead <= 0.0
+                || ahead > AVOID_RANGE
+                || (lateral.abs() > AVOID_LATERAL && !crossing_corridor)
+            {
                 continue;
             }
             let closing = vf - other_vel.dot(fwd);
-            if closing <= 0.2 {
-                continue;
-            }
+
             // Pass on the side the rival is not occupying; a Car dead ahead
             // or to the left is passed on the right.
-            let dodge_dir = if lateral < -0.5 { 1.0 } else { -1.0 };
-            let urgency = (1.0 - ahead / AVOID_RANGE) * (0.5 + self.aggression * 0.5);
-            offset += dodge_dir * urgency * AVOID_SHIFT;
+            if self.pass_target.is_none()
+                && self.abort_cooldown == 0
+                && target_speed - other_vel.dot(fwd) > 0.2
+            {
+                let aim_center = view.track.point_at_arc(aim_arc);
+                let aim_direction =
+                    (view.track.point_at_arc(aim_arc + 1.0) - aim_center).normalize_or_zero();
+                let own_aim_lateral =
+                    (view.pose - aim_center).dot(Vec2::new(-aim_direction.y, aim_direction.x));
+                let side = if vf < 6.0 && own_aim_lateral.abs() > 1.0 {
+                    own_aim_lateral.signum()
+                } else if lateral < -0.5 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for candidate in [
+                    side * AVOID_SHIFT.min(max_offset),
+                    -side * AVOID_SHIFT.min(max_offset),
+                ] {
+                    if lane_clear(candidate) {
+                        self.pass_target = Some((j, candidate));
+                        self.pass_ticks = 0;
+                        self.pass_stats.attempted += 1;
+                        break;
+                    }
+                }
+            }
             // Lift only while on a collision course with the rival: once
             // there is sideways separation off the nose, the corridor is open
             // and the driver passes instead of queuing.
-            let same_corridor = lateral.abs() < SAME_CORRIDOR_LATERAL;
-            if same_corridor && ahead < FOLLOW_GAP {
-                follow_speed = follow_speed.min(other_vel.dot(fwd).max(2.0));
+            let same_corridor = lateral.abs() < SAME_CORRIDOR_LATERAL || crossing_corridor;
+            if same_corridor && closing > 0.2 {
+                let gap = (ahead - FOLLOW_GAP - (1.0 - self.aggression) * 2.0).max(0.0);
+                let safe_speed = (other_vel.dot(fwd).max(0.0).powi(2)
+                    + 2.0 * BRAKE_ACCEL * PLAN_BRAKE_FRACTION * gap)
+                    .sqrt();
+                follow_speed = follow_speed.min(if self.pass_target.is_some() {
+                    safe_speed.max(2.0)
+                } else {
+                    safe_speed
+                });
             }
+            if same_corridor
+                && (ahead < FOLLOW_GAP + (1.0 - self.aggression) * 2.0 || self.abort_cooldown > 0)
+            {
+                let creep = if self.pass_target.is_some() { 2.0 } else { 0.0 };
+                follow_speed = follow_speed.min(other_vel.dot(fwd).max(creep));
+            }
+        }
+        if let Some((_, lane)) = self.pass_target {
+            offset = lane;
+        }
+        // Established overlap reserves a Car-width corridor plus 0.6 units.
+        // No defensive move may cross that corridor, including at turn-in.
+        let mut lane_min = -max_offset;
+        let mut lane_max = max_offset;
+        for (j, &(pose, _)) in view.field.iter().enumerate() {
+            if !view.active_rival(j) {
+                continue;
+            }
+            let gap = (pose - view.pose).dot(frame.direction);
+            let lateral = view.track.centerline_frame(pose).lateral;
+            if gap.abs() <= 4.41 && (lateral - frame.lateral).abs() > 0.5 {
+                if lateral > frame.lateral {
+                    lane_max = lane_max.min(lateral - 3.2);
+                } else {
+                    lane_min = lane_min.max(lateral + 3.2);
+                }
+            }
+        }
+        if lane_min <= lane_max {
+            offset = offset.clamp(lane_min, lane_max);
+            self.line_offset = self.line_offset.clamp(lane_min, lane_max);
+        } else {
+            offset = frame.lateral.clamp(-max_offset, max_offset);
+            follow_speed = follow_speed.min(5.0);
         }
         offset = offset.clamp(-max_offset, max_offset);
         // Commit smoothly: the line eases toward its target instead of twitching.
@@ -326,6 +510,7 @@ mod tests {
         field: &'a [(Vec2, Vec2)],
     ) -> AiView<'a> {
         AiView {
+            active: None,
             car_index: 0,
             pose,
             heading,

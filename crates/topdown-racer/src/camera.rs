@@ -137,13 +137,19 @@ pub(crate) fn update_letterbox(
 /// Interpolates Car Sprite transform and follow Camera between fixed steps.
 pub(crate) fn interpolate_car_and_camera(
     shell: Res<ShellSimulation>,
+    lead: Option<Res<crate::awareness::CameraLead>>,
     fixed_time: Res<Time<Fixed>>,
-    mut cars: Query<(&CarSprite, &mut Transform), Without<FollowCamera>>,
+    mut cars: Query<(&CarSprite, &mut Transform, &mut Visibility), Without<FollowCamera>>,
     mut cameras: Query<&mut Transform, (With<FollowCamera>, Without<CarSprite>)>,
 ) {
     let alpha = fixed_time.overstep_fraction();
 
-    for (sprite, mut car_tf) in cars.iter_mut() {
+    for (sprite, mut car_tf, mut visibility) in cars.iter_mut() {
+        *visibility = if sprite.car_index < shell.curr_snapshots.len() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
         if let (Some(prev), Some(curr)) = (
             shell.prev_snapshots.get(sprite.car_index),
             shell.curr_snapshots.get(sprite.car_index),
@@ -157,7 +163,11 @@ pub(crate) fn interpolate_car_and_camera(
             // Follow camera tracks player Car (index 0)
             if sprite.car_index == 0 {
                 for mut cam_tf in cameras.iter_mut() {
-                    let camera_pose = (interp_pose * TEXELS_PER_UNIT).round() / TEXELS_PER_UNIT;
+                    let camera_pose = ((interp_pose
+                        + lead.as_ref().map_or(Vec2::ZERO, |lead| lead.offset()))
+                        * TEXELS_PER_UNIT)
+                        .round()
+                        / TEXELS_PER_UNIT;
                     cam_tf.translation.x = camera_pose.x;
                     cam_tf.translation.y = camera_pose.y;
                     cam_tf.rotation = Quat::IDENTITY;
