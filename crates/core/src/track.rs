@@ -538,7 +538,7 @@ impl Track {
         let closing = points[0];
         *points.last_mut().unwrap() = closing;
         for (segment, pair) in points.windows(2).enumerate() {
-            if pair[0] == pair[1] {
+            if pair[0].distance(pair[1]) <= CLOSURE_TOLERANCE {
                 return Err(TrackParseError::ZeroLengthSegment { segment });
             }
         }
