@@ -1,0 +1,83 @@
+{
+  "1": {
+    "number": 49,
+    "title": "Manual driving by default with visible Autopilot ownership",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/49",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/01-explicit-driving-control.md",
+    "blockers": []
+  },
+  "2": {
+    "number": 50,
+    "title": "Match lap timing to the checker and preserve eligible Race results",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/50",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/02-trustworthy-finishes-records.md",
+    "blockers": [
+      49
+    ]
+  },
+  "3": {
+    "number": 51,
+    "title": "Make small keyboard steering corrections deliberate and repeatable",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/51",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/03-keyboard-steering.md",
+    "blockers": [
+      49
+    ]
+  },
+  "4": {
+    "number": 52,
+    "title": "Show upcoming corners and nearby rivals without changing pixel scale",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/52",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/04-corner-preview.md",
+    "blockers": [
+      42
+    ]
+  },
+  "5": {
+    "number": 53,
+    "title": "Give the hillside Track a readable braking duel and direction-change sequence",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/53",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/05-track-decision-sequence.md",
+    "blockers": [
+      43
+    ]
+  },
+  "6": {
+    "number": 54,
+    "title": "Race fixed-difficulty AI that commits to clean passes and respects overlap",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/54",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/06-ai-racecraft.md",
+    "blockers": []
+  },
+  "7": {
+    "number": 55,
+    "title": "Make braking, lost grip, surfaces, and impacts distinguishable during a Race",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/55",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/07-grip-feedback.md",
+    "blockers": [
+      44,
+      45,
+      46,
+      47
+    ]
+  },
+  "8": {
+    "number": 56,
+    "title": "Pause a Race and recover a stranded Car without gaining progress",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/56",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/08-pause-safe-recovery.md",
+    "blockers": [
+      50
+    ]
+  },
+  "9": {
+    "number": 57,
+    "title": "Practice one corner sequence with repeatable entry and exit-speed feedback",
+    "url": "https://github.com/nicolas-found42/topdown-racer/issues/57",
+    "body_file": ".scratch/gameplay-maturity/published-bodies/09-corner-practice-challenge.md",
+    "blockers": [
+      50,
+      53
+    ]
+  }
+}
