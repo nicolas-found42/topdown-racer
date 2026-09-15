@@ -667,7 +667,9 @@ impl Track {
         DirectionalGate {
             center: self.points[s] + direction * distance,
             direction,
-            half_width: self.road_half_width_at_arc(self.start_arc() + distance),
+            // Span the full wall-to-wall corridor: a car that runs wide of
+            // the painted road still crosses the timing line.
+            half_width: self.wall_distance_at(self.point_at_arc(self.start_arc() + distance)),
         }
     }
 
