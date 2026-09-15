@@ -499,12 +499,13 @@ mod tests {
     fn start_line_spans_the_local_width() {
         let geo = build_track_geometry(&ramp_track());
         // The line sits 8 units past vertex 0 (half 5 + 3), where the ramp
-        // has widened to width ~11.33 (half ~5.67): the first column
-        // centers at -half + checker_w/2 = -5.1, not the global-minimum
-        // -4.5.
+        // has widened to local full width ~11.33 (road half ~5.67). The
+        // gate spans the full wall-to-wall corridor (half_width = wall
+        // distance = local full width ~11.33), so the first column
+        // centers at -half + checker_w/2 = -10.2, not the road-half -5.1.
         let center = quad_center(geo.start_line[0]);
         assert!(
-            (center - Vec2::new(7.6, -5.1)).length() < 1e-2,
+            (center - Vec2::new(7.6, -10.2)).length() < 1e-2,
             "start line must span the local width, got {center:?}"
         );
     }

@@ -3,7 +3,6 @@ use crate::{
     simulation::{CarSnapshot, DrivingMode, GridCar, Sim, FIXED_DT},
     track::{DirectionalGate, Surface, Track},
 };
-use glam::Vec2;
 
 #[derive(Clone)]
 pub struct CornerChallenge {

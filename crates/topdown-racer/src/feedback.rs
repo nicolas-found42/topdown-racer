@@ -184,10 +184,7 @@ fn apply(
         sink.set_volume(feedback.frame.impact_volume * level);
     }
     for (car, mut sprite) in &mut cars {
-        sprite.color = if car.car_index == 0
-            && feedback.frame.impact_volume > 0.0
-            && active
-        {
+        sprite.color = if car.car_index == 0 && feedback.frame.impact_volume > 0.0 && active {
             crate::palette::color(crate::palette::RIVAL_ORANGE)
         } else {
             Color::WHITE
