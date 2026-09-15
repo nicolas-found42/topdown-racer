@@ -135,6 +135,7 @@ fn ai_control_echo_replays_the_same_car_motion_through_scripted_inputs() {
             .collect();
         // Replaying the exact echoed controls reproduces motion and race timing.
         let replayed = replay.tick(&echoed);
+        assert_eq!(actual.len(), replayed.len(), "echo must preserve car count");
         for (driven, mut replayed) in actual.iter().copied().zip(replayed) {
             // Controller ownership is provenance, not an echoed physics input.
             // A scripted Manual replay intentionally has different record
