@@ -265,3 +265,30 @@ pub(crate) fn select_pace_system(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use topdown_racer_core::simulation::RacePhase;
+    use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
+
+    /// The HUD must announce the 45 s finish window once the checker has opened.
+    #[test]
+    fn driving_summary_shows_the_finish_window_countdown() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut shell = crate::ShellSimulation::new(track);
+        let mut snapshot = shell.sim.snapshots()[0];
+        snapshot.phase = RacePhase::Racing;
+        snapshot.finish_window_ticks = Some(2880);
+        shell.curr_snapshots = vec![snapshot];
+        assert!(
+            driving_summary(&shell).contains("FINISH WINDOW 45.0s"),
+            "{}",
+            driving_summary(&shell)
+        );
+
+        snapshot.finish_window_ticks = None;
+        shell.curr_snapshots = vec![snapshot];
+        assert!(!driving_summary(&shell).contains("FINISH WINDOW"));
+    }
+}

@@ -2477,4 +2477,233 @@ mod tests {
         );
         assert!(snap.lap_times[0].is_some());
     }
+
+    /// Teleports car 0 through the Sample Circuit's checkpoints 1..=6 in
+    /// order, each with a lawful entry velocity, leaving `next_checkpoint`
+    /// back on the start segment with no lap credited yet.
+    fn walk_ordered_checkpoints(sim: &mut Sim) {
+        let legs = [
+            (Vec2::new(120.0, 0.0), Vec2::new(20.0, 0.0)),
+            (Vec2::new(160.0, 30.0), Vec2::new(40.0, 30.0)),
+            (Vec2::new(160.0, 90.0), Vec2::new(0.0, 20.0)),
+            (Vec2::new(110.0, 120.0), Vec2::new(-50.0, 30.0)),
+            (Vec2::new(40.0, 120.0), Vec2::new(-20.0, 0.0)),
+            (Vec2::new(0.0, 90.0), Vec2::new(-40.0, -30.0)),
+        ];
+        let laps_before = sim.cars[0].completed_laps;
+        for (checkpoint, (at, velocity)) in legs.into_iter().enumerate() {
+            let snap = cross_checkpoint(sim, at, velocity);
+            assert_eq!(
+                snap.completed_laps,
+                laps_before,
+                "checkpoint {} of the ordered walk must not credit a lap",
+                checkpoint + 1
+            );
+        }
+        assert_eq!(
+            sim.cars[0].next_checkpoint, sim.track.start_segment,
+            "the ordered walk must hand the route back to the start segment"
+        );
+    }
+
+    #[test]
+    fn high_speed_swept_crossing_credits_exactly_one_lap() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new(track, 1);
+        walk_ordered_checkpoints(&mut sim);
+
+        // One tick at 2000 u/s covers ~24 units, so the car goes straight
+        // from ten units behind the checker to well past it between poses:
+        // only the swept crossing can credit the lap.
+        let snap = cross_checkpoint(&mut sim, Vec2::new(0.0, 0.0), Vec2::new(2000.0, 0.0));
+        assert_eq!(snap.completed_laps, 1);
+        assert!(snap.lap_times[0].is_some());
+
+        // The next tick starts in front of the checker: no second credit.
+        let snap = sim.tick(&[CarInput::default()])[0];
+        assert_eq!(snap.completed_laps, 1);
+    }
+
+    #[test]
+    fn oscillation_across_the_gate_never_grants_extra_laps() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let gate = track.finish_gate();
+        let mut sim = Sim::new(track, 1);
+        walk_ordered_checkpoints(&mut sim);
+        let snap = cross_checkpoint(&mut sim, Vec2::new(0.0, 0.0), Vec2::new(2000.0, 0.0));
+        assert_eq!(
+            snap.completed_laps, 1,
+            "fixture must credit the ordered lap"
+        );
+
+        // Ten forward sweeps from behind the plane and ten backward sweeps
+        // from ahead of it. Re-crossing cannot credit again: the route has
+        // not been walked, and the backward sweeps start in front of the
+        // plane, where a swept crossing may never fire.
+        for i in 0..20 {
+            let (start, velocity) = if i % 2 == 0 {
+                (gate.center - gate.direction * 5.0, gate.direction * 2000.0)
+            } else {
+                (
+                    gate.center + gate.direction * 15.0,
+                    gate.direction * -2000.0,
+                )
+            };
+            let snap = cross_checkpoint(&mut sim, start, velocity);
+            assert_eq!(
+                snap.completed_laps, 1,
+                "oscillation tick {i} must not credit a lap"
+            );
+        }
+    }
+
+    #[test]
+    fn stationary_overlap_on_the_gate_never_credits_a_lap() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let gate = track.finish_gate();
+        let mut sim = Sim::new(track, 1);
+        walk_ordered_checkpoints(&mut sim);
+
+        // Park the car exactly on the checker with no motion for over 1.5 s:
+        // overlap is not a crossing, no matter how long it lasts.
+        sim.cars[0].pose = gate.center;
+        sim.cars[0].velocity = Vec2::ZERO;
+        for tick in 0..100 {
+            let snap = sim.tick(&[CarInput::default()])[0];
+            assert_eq!(snap.completed_laps, 0, "tick {tick} parked on the checker");
+        }
+    }
+
+    #[test]
+    fn lateral_crossing_outside_the_gate_width_never_credits_a_lap() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let gate = track.finish_gate();
+        let lateral = Vec2::new(-gate.direction.y, gate.direction.x);
+        let mut sim = Sim::new(track, 1);
+        walk_ordered_checkpoints(&mut sim);
+
+        // Sweep across the checker plane `half_width + 6` units to the side:
+        // the swept intersection lands outside the painted gate span.
+        let outside = gate.half_width + 6.0;
+        assert!(outside > gate.half_width);
+        let start = gate.center - gate.direction * 5.0 + lateral * outside;
+        let snap = cross_checkpoint(&mut sim, start, gate.direction * 2000.0);
+        assert_eq!(
+            snap.completed_laps, 0,
+            "a crossing outside the gate width must not credit a lap"
+        );
+        assert_eq!(
+            sim.cars[0].next_checkpoint, sim.track.start_segment,
+            "the wide sweep must leave the start checkpoint pending"
+        );
+
+        // Positive control: the same sweep through the gate center, with the
+        // start checkpoint still pending, does credit a lap.
+        let start = gate.center - gate.direction * 5.0;
+        let snap = cross_checkpoint(&mut sim, start, gate.direction * 2000.0);
+        assert_eq!(snap.completed_laps, 1);
+        assert!(snap.lap_times[0].is_some());
+    }
+
+    #[test]
+    fn finished_cars_coast_without_extra_laps_or_orders() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut sim = Sim::new(track, 2);
+        let rival_spawn = sim.cars[1].pose;
+
+        // Three ordered laps classify car 0 as the winner.
+        for lap in 0..TOTAL_LAPS {
+            walk_ordered_checkpoints(&mut sim);
+            let snap = cross_checkpoint(&mut sim, Vec2::new(0.0, 0.0), Vec2::new(2000.0, 0.0));
+            assert_eq!(snap.completed_laps, lap + 1);
+        }
+        let winner = sim.snapshots()[0];
+        assert_eq!(winner.finish_status, FinishStatus::Finished { place: 1 });
+        assert_eq!(winner.position, 1);
+        assert_eq!(
+            sim.cars[1].pose, rival_spawn,
+            "the parked rival must not be disturbed during the winner's laps"
+        );
+
+        // Coast the finished winner straight through the still-racing rival:
+        // the frozen classification and the rival's contact flag must hold.
+        sim.cars[0].pose = Vec2::new(0.0, 10.0);
+        sim.cars[0].heading = -std::f32::consts::FRAC_PI_2;
+        sim.cars[0].velocity = Vec2::new(0.0, -30.0);
+        let mut overlapped = false;
+        for _ in 0..40 {
+            let snaps = sim.tick(&[]);
+            overlapped |= obb_penetration(
+                sim.cars[0].pose,
+                sim.cars[0].heading,
+                sim.cars[1].pose,
+                sim.cars[1].heading,
+            )
+            .is_some();
+            assert_eq!(snaps[0].completed_laps, TOTAL_LAPS);
+            assert_eq!(snaps[0].finish_status, FinishStatus::Finished { place: 1 });
+            assert_eq!(snaps[0].position, 1);
+            assert!(
+                !snaps[0].car_contact,
+                "a finished car cannot contact anyone"
+            );
+            assert!(
+                !snaps[1].car_contact,
+                "a finished car must never mark the racing car"
+            );
+            assert_eq!(snaps[1].car_contact_speed, 0.0);
+        }
+        assert!(
+            overlapped,
+            "the fixture must actually coast the finished car through the rival"
+        );
+    }
+
+    #[test]
+    fn standing_start_lap_is_never_a_manual_record() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let waypoints = &track.points[..track.points.len() - 1];
+        let mut sim = Sim::new(track.clone(), 1);
+        let mut current_wp = 1;
+        let mut last_pose = sim.cars[0].pose;
+        let mut last_heading = sim.cars[0].heading;
+
+        let mut first_lap = None;
+        for _ in 0..5000 {
+            let snap = drive_step_towards_waypoints(
+                &mut sim,
+                waypoints,
+                &mut current_wp,
+                &mut last_pose,
+                &mut last_heading,
+            );
+            if snap.completed_laps == 1 && first_lap.is_none() {
+                first_lap = Some(snap);
+            }
+            if snap.completed_laps >= 2 {
+                break;
+            }
+        }
+
+        // Lap 1 starts from the grid, so it is never an eligible manual
+        // record even though it contributes to the Race duration.
+        let first = first_lap.expect("manual driving must complete the standing-start lap");
+        assert!(first.lap_times[0].is_some(), "lap 1 time is recorded");
+        assert!(
+            first.best_manual_lap_time.is_none(),
+            "the standing-start lap is never an eligible manual record"
+        );
+
+        // The first flying manual lap completes on lap 2 and is eligible.
+        let second = sim.snapshots()[0];
+        assert!(
+            second.completed_laps >= 2,
+            "manual driving must complete a flying lap"
+        );
+        assert!(second.lap_times[1].is_some(), "lap 2 time is recorded");
+        assert!(
+            second.best_manual_lap_time.is_some(),
+            "the first flying manual lap must earn the manual record"
+        );
+    }
 }

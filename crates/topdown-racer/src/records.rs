@@ -72,14 +72,25 @@ pub fn race_key(track: &Track, steering: crate::controls::SteeringResponse) -> S
 pub struct LocalRecords {
     pub book: RecordBook,
     pub notice: String,
+    /// Where the book is written. Defaults to the platform config path;
+    /// tests inject a temp path so they never touch the user's config dir.
+    pub path: std::path::PathBuf,
+}
+
+impl LocalRecords {
+    /// Loads the book stored at `path`, remembering it for later saves.
+    pub fn from_path(path: std::path::PathBuf) -> Self {
+        Self {
+            book: RecordBook::load(&path),
+            notice: String::new(),
+            path,
+        }
+    }
 }
 
 impl Default for LocalRecords {
     fn default() -> Self {
-        Self {
-            book: RecordBook::load(&record_path()),
-            notice: String::new(),
-        }
+        Self::from_path(record_path())
     }
 }
 
@@ -98,7 +109,7 @@ pub(crate) fn persist_completed_laps(
         {
             let key = crate::practice::record_key(&shell);
             if records.book.consider(&key, seconds, true) {
-                records.notice = match records.book.save(&record_path()) {
+                records.notice = match records.book.save(&records.path) {
                     Ok(()) => String::new(),
                     Err(_) => "Practice record kept for this session; local save failed".into(),
                 };
@@ -113,11 +124,85 @@ pub(crate) fn persist_completed_laps(
         .and_then(|car| car.best_manual_lap_time)
     {
         if records.book.consider(&key, best, true) {
-            records.notice = match records.book.save(&record_path()) {
+            records.notice = match records.book.save(&records.path) {
                 Ok(()) => String::new(),
                 Err(_) => "Record kept for this session; local save failed".to_owned(),
             };
         }
     }
     saved.0 = records.book.best(&key);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SavedBestLap;
+    use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
+
+    fn temp_record_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("racer-records-{tag}-{}.json", std::process::id()))
+    }
+
+    /// A shell whose live snapshot carries an eligible manual best, as the sim
+    /// would produce at the tick an eligible flying lap completes.
+    fn shell_with_manual_best(best: Option<f32>) -> crate::ShellSimulation {
+        let mut shell = crate::ShellSimulation::new(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        let mut snapshot = shell.sim.snapshots()[0];
+        snapshot.best_manual_lap_time = best;
+        shell.curr_snapshots = vec![snapshot];
+        shell
+    }
+
+    #[test]
+    fn an_eligible_manual_best_reaches_the_record_file_at_the_lap_completion_tick() {
+        let path = temp_record_path("eligible-manual");
+        let _ = std::fs::remove_file(&path);
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+
+        let mut app = App::new();
+        app.insert_resource(LocalRecords::from_path(path.clone()))
+            .insert_resource(shell_with_manual_best(Some(28.5)))
+            .init_resource::<SavedBestLap>()
+            .add_systems(Update, persist_completed_laps);
+        app.update();
+
+        let key = race_key(&track, crate::controls::SteeringResponse::Raw);
+        assert_eq!(
+            RecordBook::load(&path).best(&key),
+            Some(28.5),
+            "an eligible manual best must be written to the records file"
+        );
+        assert_eq!(
+            app.world().resource::<SavedBestLap>().0,
+            Some(28.5),
+            "the menu target must see the written best"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn an_assisted_race_never_writes_a_record_file() {
+        let path = temp_record_path("assisted");
+        let _ = std::fs::remove_file(&path);
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+
+        let mut app = App::new();
+        app.insert_resource(LocalRecords::from_path(path.clone()))
+            .insert_resource(shell_with_manual_best(None))
+            .init_resource::<SavedBestLap>()
+            .add_systems(Update, persist_completed_laps);
+        app.update();
+
+        let key = race_key(&track, crate::controls::SteeringResponse::Raw);
+        assert_eq!(
+            RecordBook::load(&path).best(&key),
+            None,
+            "an assisted race must never create or update a record"
+        );
+        assert_eq!(
+            app.world().resource::<SavedBestLap>().0,
+            None,
+            "an assisted race must not publish a menu target"
+        );
+    }
 }

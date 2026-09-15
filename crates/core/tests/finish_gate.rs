@@ -199,3 +199,83 @@ fn lapped_player_takes_flag_on_next_valid_crossing_after_winner() {
     }
     panic!("lapped player never classified");
 }
+
+#[test]
+fn skipped_checkpoints_cannot_credit_a_lap_at_the_gate() {
+    use topdown_racer_core::simulation::GridCar;
+    let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+    // Placed on the grid facing the checker with rolling speed: the car
+    // sweeps through the gate within the first second of the Race, but it
+    // never cleared a single earlier checkpoint on the way.
+    let mut sim = Sim::from_grid(
+        track,
+        &[GridCar {
+            pose: Vec2::new(0.0, 0.0),
+            heading: 0.0,
+            velocity: Vec2::new(50.0, 0.0),
+        }],
+    );
+
+    let mut previous = sim.snapshots()[0];
+    let mut swept_the_gate = false;
+    for tick in 0..100 {
+        let snap = sim.tick(&[])[0];
+        swept_the_gate |= previous.pose.x <= 10.0 && snap.pose.x > 10.0;
+        assert_eq!(
+            snap.completed_laps, 0,
+            "tick {tick}: a gate crossing without the ordered route cannot credit a lap"
+        );
+        assert_eq!(snap.lap_times, [None; 3], "tick {tick}");
+        previous = snap;
+    }
+    assert!(
+        swept_the_gate,
+        "fixture must actually sweep the unchecked car through the gate"
+    );
+}
+
+#[test]
+fn autopilot_lap_is_ineligible_for_a_manual_record() {
+    use topdown_racer_core::ai::AiDriver;
+    let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+    let mut sim = Sim::new(track, 1);
+    sim.set_ai(0, Some(AiDriver::new(0)));
+
+    let mut ticks = 0;
+    while sim.snapshots()[0].completed_laps < 1 {
+        sim.tick(&[]);
+        ticks += 1;
+        assert!(
+            ticks < 4000,
+            "autopilot must complete a lap; gave up after {ticks} ticks"
+        );
+    }
+    let first = sim.snapshots()[0];
+    assert!(
+        first.best_lap_time.is_some(),
+        "an autopilot lap still records a lap time"
+    );
+    assert!(
+        first.best_manual_lap_time.is_none(),
+        "an autopilot lap is never eligible for the manual record"
+    );
+
+    // The first completed lap can never be a manual record (no completed
+    // lap precedes it), so drive a second assisted lap to prove the
+    // eligibility rule itself rejects autopilot laps.
+    while sim.snapshots()[0].completed_laps < 2 {
+        sim.tick(&[]);
+        ticks += 1;
+        assert!(
+            ticks < 8000,
+            "autopilot must complete a second lap; gave up after {ticks} ticks"
+        );
+    }
+    let second = sim.snapshots()[0];
+    assert!(second.lap_assisted[1], "lap 2 must be flagged assisted");
+    assert!(
+        second.best_manual_lap_time.is_none(),
+        "autopilot laps never earn the manual record"
+    );
+    assert!(second.best_lap_time.is_some());
+}
