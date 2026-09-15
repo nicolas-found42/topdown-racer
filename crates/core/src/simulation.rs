@@ -598,7 +598,11 @@ impl Sim {
     /// Requires speed below 1 u/s and three seconds of active time between uses.
     pub fn recover_player(&mut self) -> Result<(), RecoveryError> {
         let car = self.cars.first().ok_or(RecoveryError::Unavailable)?;
-        if self.phase != RacePhase::Racing || car.finish_status != FinishStatus::Racing {
+        if self.paused
+            || self.resume_ticks > 0
+            || self.phase != RacePhase::Racing
+            || car.finish_status != FinishStatus::Racing
+        {
             return Err(RecoveryError::Unavailable);
         }
         if car
