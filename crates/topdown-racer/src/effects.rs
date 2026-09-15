@@ -164,11 +164,13 @@ fn render_decals(
 ) {
     for (slot, mut sprite, mut transform, mut visibility) in &mut decals {
         if let Some(mark) = effects.decals.marks.get(slot.0) {
-            *visibility = Visibility::Visible;
+            if *visibility != Visibility::Visible {
+                *visibility = Visibility::Visible;
+            }
             sprite.custom_size = Some(Vec2::new(mark.length + 0.125, 0.25));
             *transform = Transform::from_xyz(mark.center.x, mark.center.y, world_z::SKID)
                 .with_rotation(Quat::from_rotation_z(mark.heading));
-        } else {
+        } else if *visibility != Visibility::Hidden {
             *visibility = Visibility::Hidden;
         }
     }
