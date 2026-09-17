@@ -88,3 +88,59 @@ fn an_ineligible_update_cannot_overwrite_or_create_a_record() {
     assert!(!book.consider("race:key", 20.0, false));
     assert_eq!(book.best("race:key"), Some(30.0));
 }
+
+#[test]
+fn failed_replacement_preserves_the_previous_record_until_a_successful_save() {
+    let root = std::env::temp_dir().join(format!("racer-replacement-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("records-v2.json");
+    let mut book = RecordBook::default();
+    book.consider("race:current", 30.0, true);
+    book.save(&path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+
+    // Prevent creating the staging file while leaving the existing record
+    // writable. A failed update must never truncate the last durable best.
+    let staging = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::create_dir(&staging).unwrap();
+    book.consider("race:current", 28.5, true);
+    assert!(book.save(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(RecordBook::load(&path).best("race:current"), Some(30.0));
+    assert_eq!(book.best("race:current"), Some(28.5));
+
+    std::fs::remove_dir(staging).unwrap();
+    book.save(&path).unwrap();
+    assert_eq!(RecordBook::load(&path).best("race:current"), Some(28.5));
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+fn legacy_times_are_preserved_but_never_compared_to_current_records() {
+    use topdown_racer::controls::SteeringResponse;
+    use topdown_racer::records::{race_key, LocalRecords};
+    use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
+
+    let root = std::env::temp_dir().join(format!("racer-legacy-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let legacy = root.join("best_lap.txt");
+    std::fs::write(&legacy, "20.296875").unwrap();
+    let path = root.join("records-v2.json");
+    let key = race_key(
+        &Track::parse(SAMPLE_CIRCUIT).unwrap(),
+        SteeringResponse::Raw,
+    );
+    let mut records = LocalRecords::from_path(path.clone());
+    assert_eq!(records.book.best(&key), None);
+    assert!(records.book.consider(&key, 30.0, true));
+    records.book.save(&path).unwrap();
+    assert_eq!(
+        LocalRecords::from_path(path.clone()).book.best(&key),
+        Some(30.0)
+    );
+    assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "20.296875");
+    std::fs::remove_file(legacy).unwrap();
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}

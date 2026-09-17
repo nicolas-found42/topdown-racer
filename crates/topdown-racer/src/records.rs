@@ -205,4 +205,36 @@ mod tests {
             "an assisted race must not publish a menu target"
         );
     }
+
+    #[test]
+    fn failed_save_keeps_the_menu_target_after_restarting_the_race() {
+        let root = temp_record_path("notice");
+        std::fs::create_dir_all(&root).unwrap();
+        // A regular file cannot contain the requested records file. This fails
+        // reliably without relying on platform-specific permission semantics.
+        let blocker = root.join("not-a-directory");
+        std::fs::write(&blocker, "occupied").unwrap();
+        let path = blocker.join("records-v2.json");
+        let mut app = App::new();
+        app.insert_resource(LocalRecords::from_path(path))
+            .insert_resource(shell_with_manual_best(Some(28.5)))
+            .init_resource::<SavedBestLap>()
+            .add_systems(Update, persist_completed_laps);
+        app.update();
+
+        assert_eq!(app.world().resource::<SavedBestLap>().0, Some(28.5));
+        assert!(!app.world().resource::<LocalRecords>().notice.is_empty());
+
+        // Restart has no completed laps. The session best and failure notice
+        // must survive it, even though nothing could be persisted to disk.
+        app.insert_resource(crate::ShellSimulation::new(
+            Track::parse(SAMPLE_CIRCUIT).unwrap(),
+        ));
+        app.update();
+        assert_eq!(app.world().resource::<SavedBestLap>().0, Some(28.5));
+        assert!(!app.world().resource::<LocalRecords>().notice.is_empty());
+        assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "occupied");
+        std::fs::remove_file(blocker).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 }
