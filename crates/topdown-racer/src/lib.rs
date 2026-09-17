@@ -453,8 +453,7 @@ pub fn read_keyboard_input(
 }
 
 /// Fixed step system: advances the simulation at 64 Hz using mapped player
-/// inputs. Cars with an AI driver compute their own input unless the player
-/// overrides it for that tick.
+/// inputs in Manual. Autopilot owns the player's entire input for the tick.
 fn step_simulation(
     mut shell: ResMut<ShellSimulation>,
     player_input: Res<PlayerInput>,
@@ -678,7 +677,8 @@ mod tests {
     #[test]
     fn toggling_to_manual_requires_held_controls_to_be_released() {
         let mut app = App::new();
-        let mut shell = ShellSimulation::new(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        let mut shell =
+            ShellSimulation::from_sim(Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 1));
         shell
             .sim
             .request_player_mode(topdown_racer_core::simulation::DrivingMode::Autopilot);
@@ -720,7 +720,22 @@ mod tests {
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::KeyW);
         app.update();
-        assert_eq!(app.world().resource::<PlayerInput>().0.throttle, 1.0);
+        for _ in 0..32 {
+            app.update();
+            let snap = app.world().resource::<ShellSimulation>().curr_snapshots[0];
+            assert_eq!(snap.throttle, 1.0);
+        }
+        let driven = app.world().resource::<ShellSimulation>().curr_snapshots[0];
+        assert!(driven.forward_speed > 1.0);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        app.update();
+        let coast = app.world().resource::<ShellSimulation>().curr_snapshots[0];
+        assert_eq!(coast.throttle, 0.0);
+        assert_eq!(coast.steer, 0.0);
+        assert!(coast.forward_speed > 0.0);
+        assert!(coast.forward_speed < driven.forward_speed);
     }
 
     #[test]

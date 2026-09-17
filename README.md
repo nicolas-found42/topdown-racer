@@ -29,6 +29,10 @@ cargo run --package topdown-racer
 
 Start a three-lap Race against three AI Opponents with Enter or the Start Race
 button. Choose the opponent pace in the menu with 1–3.
+Manual is the default: releasing the controls coasts without handing the Car to
+AI. Choose Autopilot explicitly with T in the menu or during racing; it owns all
+driving controls until toggled off. Switching requires releasing held driving
+keys, and a lap remains assisted even after switching back to Manual.
 
 | Control | Action |
 | --- | --- |

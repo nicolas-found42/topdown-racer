@@ -56,6 +56,9 @@ fn restore_race_menu(mut shell: ResMut<ShellSimulation>) {
         shell.practice_selected = false;
         shell.sim.request_player_mode(mode);
         shell.reset_to_fresh_race();
+    } else if shell.sim.is_paused() {
+        // Menu selection must not be blocked by the previous Race's pause.
+        shell.reset_to_fresh_race();
     }
 }
 
@@ -319,6 +322,76 @@ mod tests {
         press(&mut app, KeyCode::KeyM);
         settle(&mut app);
         assert_eq!(state(&mut app), AppState::Menu);
+    }
+
+    #[test]
+    fn returning_from_pause_allows_a_fresh_menu_ownership_selection() {
+        use topdown_racer_core::simulation::DrivingMode;
+        let mut app = lifecycle_app(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        app.add_systems(PreUpdate, crate::toggle_autopilot_system);
+        press(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        press(&mut app, KeyCode::Escape);
+        settle(&mut app);
+        press(&mut app, KeyCode::KeyM);
+        settle(&mut app);
+        assert_eq!(state(&mut app), AppState::Menu);
+        press(&mut app, KeyCode::KeyT);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        assert_eq!(
+            app.world().resource::<ShellSimulation>().sim.player_mode(),
+            DrivingMode::Autopilot,
+            "the menu toggle must not remain blocked by the previous Race's pause"
+        );
+        press(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+        let snap = shell.sim.tick(&[])[0];
+        assert_eq!(snap.driving_mode, DrivingMode::Autopilot);
+        assert_eq!(snap.forward_speed, 0.0);
+        assert_eq!(snap.completed_laps, 0);
+        assert!(!snap.current_lap_assisted);
+    }
+
+    #[test]
+    fn paused_toggle_cannot_change_manual_ownership_on_resume() {
+        use topdown_racer_core::simulation::DrivingMode;
+        let mut app = lifecycle_app(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        app.add_systems(PreUpdate, crate::toggle_autopilot_system);
+        press(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        {
+            let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+            for _ in 0..DEFAULT_COUNTDOWN_TICKS {
+                shell.sim.tick(&[]);
+            }
+            shell.sim.request_player_mode(DrivingMode::Autopilot);
+            shell.sim.tick(&[]);
+            shell.sim.request_player_mode(DrivingMode::Manual);
+            shell.sim.tick(&[]);
+        }
+        press(&mut app, KeyCode::Escape);
+        settle(&mut app);
+        press(&mut app, KeyCode::KeyT);
+        app.update();
+        assert!(app.world().resource::<ShellSimulation>().sim.is_paused());
+        assert_eq!(
+            app.world().resource::<ShellSimulation>().sim.player_mode(),
+            DrivingMode::Manual
+        );
+        press(&mut app, KeyCode::Enter);
+        settle(&mut app);
+        let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+        assert!(!shell.sim.is_paused());
+        for _ in 0..65 {
+            let snap = shell.sim.tick(&[])[0];
+            assert_eq!(snap.driving_mode, DrivingMode::Manual);
+            assert_eq!((snap.throttle, snap.steer), (0.0, 0.0));
+            assert!(snap.current_lap_assisted);
+        }
     }
 
     #[test]
