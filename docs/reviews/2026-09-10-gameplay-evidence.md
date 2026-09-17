@@ -11,17 +11,34 @@ The full-Race comparison quantizes the same deterministic driver's steering to
 left/neutral/right before applying each candidate response. This is a synthetic
 controller experiment, not evidence of human preference.
 
-| Rise | Eight-tick heading change | Steering after four reversal ticks | Wall-contact ticks in three laps | Flying laps (s) |
-| --- | ---: | ---: | ---: | --- |
-| Raw | 22.918 degrees | -1.000 | 0 | 29.266, 29.219 |
-| 50 ms | 20.796 degrees | -0.250 | 0 | 29.875, 29.984 |
-| 100 ms | 17.367 degrees | -0.250 | 0 | 29.641, 29.656 |
-| 150 ms | 13.600 degrees | -0.208 | 0 | 29.500, 29.516 |
+| Rise | Eight-tick heading change | Steering after four reversal ticks | Release-to-neutral ticks | Wall-contact ticks in three laps | Clean laps (no wall/car contact, Road) | Flying laps (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Raw | 22.918 degrees | -1.000 | 1 | 0 | 3 | 29.266, 29.219 |
+| 50 ms | 20.796 degrees | -0.250 | 4 | 0 | 3 | 29.875, 29.984 |
+| 100 ms | 17.367 degrees | -0.250 | 4 | 0 | 3 | 29.641, 29.656 |
+| 150 ms | 13.600 degrees | -0.208 | 3 | 0 | 3 | 29.500, 29.516 |
 
 Raw stays default. The selectable 100 ms Smooth response reduces the measured
 short correction without the larger initial delay of 150 ms; reversal uses the
-faster return rate. No claim is made that this is the fastest or preferred human
-setting. Sustained human comparison remains untested.
+faster return rate. Sustained human comparison remains untested. The steering
+echo in the snapshot is the filtered command actually reaching Car physics in
+Manual, so replaying an echo sequence reproduces the same snapshots; Bevy's
+fixed-step accumulator makes the effective command stream identical at any
+render cadence. Automated lap speed is not evidence of human feel, and no such
+claim is made here.
+
+Boundary regression coverage pins the applied echo sequence, release and
+reversal, immediate neutral when both steering directions are held, Autopilot
+and AI Opponent bypass, mode-toggle ownership reset, menu selection through the
+lifecycle state machine, focus-loss pause, and restart with a clean filter
+while the chosen Raw/Smooth policy persists. The native `issue51_capture`
+example exercised the real window surface: menu text renders the Raw/Smooth
+explanation, the F key flips the policy, the applied echo ramped 0.15625→1.0
+over the held ticks and returned 0.6875→0 within two ticks of release, and
+Esc/R restart cleared to zero steering with the Smooth policy intact. Screens:
+`.scratch/issue-51/{raw-menu,smooth-menu,steering,release,restart}.png`.
+These captures verify control selection, steering, release, and restart on the
+real surface, not human preference.
 
 ## Hillside sequence and choices (#43, #53, #57)
 
@@ -91,8 +108,97 @@ Impact onset has bounded volume and a decaying envelope, with quiet-time rearmin
 instead of tick-by-tick retriggering. B selects full, half, or muted volume. Pause
 and menu silence feedback. Unit tests verify load/surface/contact distinctions.
 An actual listening session remains outstanding; no claim of auditioned sound
-quality is made. Full smoke/dust/streak capture coverage and motion-comfort
-judgment also remain outstanding.
+quality is made. The #55 follow-up below adds smoke/dust/impact captures;
+subjective listening and human motion-comfort judgment remain outstanding.
+
+## Issue #55 follow-up (2026-09-17)
+
+Native Bevy/Metal capture, not a simulated browser image or a human driving
+session. Run `cargo run -p topdown-racer --example issue55_capture -- <case>`
+with `BEVY_ASSET_ROOT` pointing to the absolute `crates/topdown-racer` directory.
+Cases: `brake`, `drift`, `surface`, `impact`, `combined`. Each runs a four-Car
+rolling fixture with real physics, snapshots, render systems, and audio plugin.
+The fixture suppresses focus events (only in this example) and removes the
+countdown GO label because the rolling grid has no countdown. Production
+focus/pause policy is unchanged. Direct-executable runs use the same asset root.
+
+Computer inspection of the actual native window screenshots:
+
+- [Braking](issue-55/brake.png): red rear lamps on the blue player and white
+  AI Opponent; all four silhouettes and road edges remain clear.
+- [Lost grip](issue-55/drift.png): pale twin handbrake puffs and black tire
+  marks are distinct from red brake lamps; nearby rivals remain readable.
+- [Physical grass](issue-55/surface.png): warm dirt-colored rear trails on
+  all four Cars, distinct from pale handbrake smoke. Terrain Zones are not read.
+- [Wall impact](issue-55/impact.png): brief cream nose-local highlight on the
+  blue Car after actual wall contact. No camera-shake effect exists.
+- [Combined onset](issue-55/combined.png) and
+  [sustained handbrake](issue-55/combined-sustained.png): smoke, dust and marks
+  coexist; white road limit and three nearby rivals remain visible at the
+  captured onset and after 80 ticks (1.25 seconds). This is sampled native
+  visual evidence, not a subjective continuous-motion comfort judgment.
+
+Initial captures exposed flat, fully opaque square smoke textures. Replaced
+both stamps with original transparent stepped silhouettes and capped runtime
+opacity at 45%. Cadence, density budgets, dimensions, and lifetime are unchanged.
+The original artwork recipe and provenance are in `assets/sprites/fx/README.md`.
+
+Acceptance audit:
+
+1. **Pass:** all-Car brake-light system reads applied snapshot brake, not
+   deceleration. Existing `brake_lights_follow_each_cars_echo_not_handbrake_or_motion`
+   regression and native brake capture cover the contract.
+2. **Pass:** #45–#47 triggers remain unchanged: Drift emits marks, handbrake
+   emits smoke (including standstill, immediately removed on release), and
+   physical non-Road movement above 2 u/s emits dust. Existing boundary tests
+   pass; this change adjusts only particle artwork/opacity.
+3. **Pass for captured examples:** the five captures above distinguish the
+   four cues and show road/rival readability, including a sustained combined
+   case. Human readability preference remains subjective and unclaimed.
+4. **Pass:** engine gain follows throttle load (0.12 coast / 0.30 full load
+   before effects volume), separately from speed-based pitch. Existing
+   feedback regression compares load/coast at the same speed. No RPM/gearbox
+   simulation is claimed or introduced.
+5. **Pass:** tire gain smooths observable lateral velocity projected against
+   Car heading, gated by Drift. New regression checks rise, severity change,
+   and release decay. No snapshot or physics changes were necessary.
+6. **Pass:** dust and rough-surface audio consume physical `Surface`; no
+   decorative Terrain Zone participates in the mixer or emission path.
+7. **Pass:** impact volume is clamped 0.1–0.8, flash fades in about 0.2 seconds,
+   and retrigger requires eight consecutive contact-free ticks. Fixed quiet
+   ticks erroneously accumulating through contact chatter. The old root-Sprite
+   query matched no Cars after the child-Sprite migration; a dedicated player
+   nose child now renders the cue. Audio uses a true one-shot restarted at
+   onset, not a loop at an arbitrary phase. FixedUpdate onsets are latched
+   until Update consumes them. No camera shake.
+8. **Pass:** 2048 decal slots, 128 airborne slots shared by all Cars, and four
+   player audio voices (engine/tire/rough/impact). Impact reuses one entity and
+   stops its old sink before replacement. New ten-restart lifecycle regression
+   confirms bounded entity/voice ownership, one-consumption onset and flash
+   expiry; existing particle/decal capacity and reset regressions pass.
+9. **Pass:** B still cycles full/half/mute. Menu, pause and preparation silence
+   loops; impacts stop rather than replay after resume. Production focus loss
+   retains deliberate-pause policy. No lifecycle policy change.
+10. **Pass:** original procedural PCM and newly original pixel silhouettes;
+    no copied game audio/art; asset provenance updated.
+11. **Pass with explicitly outstanding audition:** scripted tests and native
+    visual inspection completed. **No actual listening session was performed**;
+    PCM tests and running the audio plugin are not evidence of perceived sound
+    quality or speaker playback. Human audio audition remains outstanding.
+12. **Pass:** `cargo fmt --all -- --check`,
+    `cargo clippy --all-targets --all-features -- -D warnings`, and
+    `cargo test --workspace --all-targets --all-features` pass (218 tests).
+    `cargo test -p topdown-racer --test feedback -- --nocapture` passes five
+    tests; the parallel simulations with and without presentation mixing have
+    identical snapshots every tick and the player finishes at tick 6221.
+    `cargo test -p topdown-racer feedback::tests -- --nocapture` passes the
+    ten-restart lifecycle regression. No core files were changed.
+
+Builds report the pre-existing upstream `block v0.1.6` future-incompatibility
+notice, not a current compiler/Clippy warning failure. Earlier working checks
+caught a nonexistent test API and an eight-argument system lint; both corrected
+before the passing final checks. An initial impact fixture missed the wall;
+the final fixture starts near the physical boundary and captures real contact.
 
 
 ## Final validation

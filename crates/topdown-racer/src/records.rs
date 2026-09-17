@@ -4,9 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Write, path::Path};
 use topdown_racer_core::track::Track;
 
+/// Measurements belonging to the fastest eligible traversal of one challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PracticeRecord {
+    pub seconds: f32,
+    pub exit_speed: f32,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct RecordBook {
     entries: BTreeMap<String, f32>,
+    #[serde(default)]
+    practice_entries: BTreeMap<String, PracticeRecord>,
 }
 
 impl RecordBook {
@@ -33,6 +42,31 @@ impl RecordBook {
         self.entries.insert(key.to_owned(), seconds);
         true
     }
+    pub fn practice_best(&self, key: &str) -> Option<PracticeRecord> {
+        self.practice_entries.get(key).copied().filter(|record| {
+            record.seconds.is_finite()
+                && record.seconds > 0.0
+                && record.exit_speed.is_finite()
+                && record.exit_speed >= 0.0
+        })
+    }
+
+    pub fn consider_practice(&mut self, key: &str, record: PracticeRecord, eligible: bool) -> bool {
+        if !eligible
+            || !record.seconds.is_finite()
+            || record.seconds <= 0.0
+            || !record.exit_speed.is_finite()
+            || record.exit_speed < 0.0
+            || self
+                .practice_best(key)
+                .is_some_and(|best| best.seconds <= record.seconds)
+        {
+            return false;
+        }
+        self.practice_entries.insert(key.to_owned(), record);
+        true
+    }
+
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
@@ -104,11 +138,20 @@ pub(crate) fn persist_completed_laps(
     mut saved: ResMut<crate::SavedBestLap>,
 ) {
     if let Some(attempt) = &shell.practice {
-        if let topdown_racer_core::practice::PracticeStatus::Finished { seconds, .. } =
-            attempt.status()
+        if let topdown_racer_core::practice::PracticeStatus::Finished {
+            seconds,
+            exit_speed,
+        } = attempt.status()
         {
             let key = crate::practice::record_key(&shell);
-            if records.book.consider(&key, seconds, true) {
+            if records.book.consider_practice(
+                &key,
+                PracticeRecord {
+                    seconds,
+                    exit_speed,
+                },
+                true,
+            ) {
                 records.notice = match records.book.save(&records.path) {
                     Ok(()) => String::new(),
                     Err(_) => "Practice record kept for this session; local save failed".into(),
@@ -204,5 +247,37 @@ mod tests {
             None,
             "an assisted race must not publish a menu target"
         );
+    }
+
+    #[test]
+    fn failed_save_keeps_the_menu_target_after_restarting_the_race() {
+        let root = temp_record_path("notice");
+        std::fs::create_dir_all(&root).unwrap();
+        // A regular file cannot contain the requested records file. This fails
+        // reliably without relying on platform-specific permission semantics.
+        let blocker = root.join("not-a-directory");
+        std::fs::write(&blocker, "occupied").unwrap();
+        let path = blocker.join("records-v2.json");
+        let mut app = App::new();
+        app.insert_resource(LocalRecords::from_path(path))
+            .insert_resource(shell_with_manual_best(Some(28.5)))
+            .init_resource::<SavedBestLap>()
+            .add_systems(Update, persist_completed_laps);
+        app.update();
+
+        assert_eq!(app.world().resource::<SavedBestLap>().0, Some(28.5));
+        assert!(!app.world().resource::<LocalRecords>().notice.is_empty());
+
+        // Restart has no completed laps. The session best and failure notice
+        // must survive it, even though nothing could be persisted to disk.
+        app.insert_resource(crate::ShellSimulation::new(
+            Track::parse(SAMPLE_CIRCUIT).unwrap(),
+        ));
+        app.update();
+        assert_eq!(app.world().resource::<SavedBestLap>().0, Some(28.5));
+        assert!(!app.world().resource::<LocalRecords>().notice.is_empty());
+        assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "occupied");
+        std::fs::remove_file(blocker).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 }

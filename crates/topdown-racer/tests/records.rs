@@ -1,4 +1,4 @@
-use topdown_racer::records::RecordBook;
+use topdown_racer::records::{PracticeRecord, RecordBook};
 
 #[test]
 fn eligible_records_persist_separately_by_identity() {
@@ -9,11 +9,16 @@ fn eligible_records_persist_separately_by_identity() {
     assert!(book.consider("race:a:raw", 30.0, true));
     assert!(!book.consider("race:a:raw", f32::NAN, true));
     assert!(!book.consider("race:a:raw", 31.0, true));
-    book.consider("practice:a:raw", 8.0, true);
+    let practice = PracticeRecord {
+        seconds: 8.0,
+        exit_speed: 24.0,
+    };
+    book.consider_practice("practice:a:raw", practice, true);
     book.save(&path).unwrap();
     let loaded = RecordBook::load(&path);
     assert_eq!(loaded.best("race:a:raw"), Some(30.0));
-    assert_eq!(loaded.best("practice:a:raw"), Some(8.0));
+    assert_eq!(loaded.practice_best("practice:a:raw"), Some(practice));
+    assert_eq!(loaded.best("practice:a:raw"), None);
     assert_eq!(loaded.best("race:b:raw"), None);
     assert_eq!(loaded.best("race:a:smooth"), None);
     std::fs::remove_file(path).unwrap();
@@ -87,4 +92,113 @@ fn an_ineligible_update_cannot_overwrite_or_create_a_record() {
     assert!(book.consider("race:key", 30.0, true));
     assert!(!book.consider("race:key", 20.0, false));
     assert_eq!(book.best("race:key"), Some(30.0));
+}
+
+#[test]
+fn failed_replacement_preserves_the_previous_record_until_a_successful_save() {
+    let root = std::env::temp_dir().join(format!("racer-replacement-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("records-v2.json");
+    let mut book = RecordBook::default();
+    book.consider("race:current", 30.0, true);
+    book.save(&path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+
+    // Prevent creating the staging file while leaving the existing record
+    // writable. A failed update must never truncate the last durable best.
+    let staging = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::create_dir(&staging).unwrap();
+    book.consider("race:current", 28.5, true);
+    assert!(book.save(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(RecordBook::load(&path).best("race:current"), Some(30.0));
+    assert_eq!(book.best("race:current"), Some(28.5));
+
+    std::fs::remove_dir(staging).unwrap();
+    book.save(&path).unwrap();
+    assert_eq!(RecordBook::load(&path).best("race:current"), Some(28.5));
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+fn legacy_times_are_preserved_but_never_compared_to_current_records() {
+    use topdown_racer::controls::SteeringResponse;
+    use topdown_racer::records::{race_key, LocalRecords};
+    use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
+
+    let root = std::env::temp_dir().join(format!("racer-legacy-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let legacy = root.join("best_lap.txt");
+    std::fs::write(&legacy, "20.296875").unwrap();
+    let path = root.join("records-v2.json");
+    let key = race_key(
+        &Track::parse(SAMPLE_CIRCUIT).unwrap(),
+        SteeringResponse::Raw,
+    );
+    let mut records = LocalRecords::from_path(path.clone());
+    assert_eq!(records.book.best(&key), None);
+    assert!(records.book.consider(&key, 30.0, true));
+    records.book.save(&path).unwrap();
+    assert_eq!(
+        LocalRecords::from_path(path.clone()).book.best(&key),
+        Some(30.0)
+    );
+    assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "20.296875");
+    std::fs::remove_file(legacy).unwrap();
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+fn practice_comparison_keeps_both_measurements_of_the_fastest_eligible_attempt() {
+    let mut book = RecordBook::default();
+    let best = PracticeRecord {
+        seconds: 10.0,
+        exit_speed: 22.0,
+    };
+    assert!(book.consider_practice("challenge", best, true));
+    for (candidate, eligible) in [
+        (
+            PracticeRecord {
+                seconds: 11.0,
+                exit_speed: 29.0,
+            },
+            true,
+        ),
+        (
+            PracticeRecord {
+                seconds: 9.0,
+                exit_speed: 25.0,
+            },
+            false,
+        ),
+        (
+            PracticeRecord {
+                seconds: 9.0,
+                exit_speed: f32::NAN,
+            },
+            true,
+        ),
+    ] {
+        assert!(!book.consider_practice("challenge", candidate, eligible));
+        assert_eq!(book.practice_best("challenge"), Some(best));
+    }
+    let improved = PracticeRecord {
+        seconds: 9.5,
+        exit_speed: 21.0,
+    };
+    assert!(book.consider_practice("challenge", improved, true));
+    assert_eq!(book.practice_best("challenge"), Some(improved));
+    assert_eq!(book.best("challenge"), None);
+}
+
+#[test]
+fn old_time_only_records_preserve_race_targets_without_fabricating_exit_speed() {
+    let path = std::env::temp_dir().join(format!("racer-time-only-{}.json", std::process::id()));
+    std::fs::write(&path, r#"{"entries":{"race:a":30.0,"practice:a":8.0}}"#).unwrap();
+    let book = RecordBook::load(&path);
+    assert_eq!(book.best("race:a"), Some(30.0));
+    assert_eq!(book.practice_best("practice:a"), None);
+    std::fs::remove_file(path).unwrap();
 }

@@ -21,6 +21,9 @@ mod results;
 mod track_geometry;
 pub mod world_bake;
 
+#[cfg(test)]
+mod steering_tests;
+
 pub use audio::{
     create_pcm_wav, engine_pitch_from_speed, generate_engine_loop_wav, generate_skid_loop_wav,
     mute_audio, skid_volume_from_drift, unmute_audio, update_audio, EngineAudio, SkidAudio,
@@ -106,9 +109,12 @@ pub struct ShellSimulation {
     pub practice_selected: bool,
     pub race_mode_before_practice: topdown_racer_core::simulation::DrivingMode,
     pub practice: Option<topdown_racer_core::practice::PracticeAttempt>,
-    pub practice_baseline: Option<f32>,
+    pub practice_baseline: Option<records::PracticeRecord>,
     pub camera_mode: awareness::CameraMode,
+    /// Pose discontinuities, including Recovery and a fresh Race.
     pub generation: u64,
+    /// Fresh Race identity; Recovery must not erase persistent world marks.
+    pub race_generation: u64,
     pub steering_response: controls::SteeringResponse,
     pub selected_pace: topdown_racer_core::ai::OpponentPace,
     pub sim: Sim,
@@ -130,6 +136,7 @@ impl ShellSimulation {
             practice_baseline: None,
             camera_mode: Default::default(),
             generation: 0,
+            race_generation: 0,
             steering_response: Default::default(),
             selected_pace: sim.opponent_pace(),
             sim,
@@ -146,6 +153,7 @@ impl ShellSimulation {
         let response = self.steering_response;
         let camera_mode = self.camera_mode;
         let generation = self.generation + 1;
+        let race_generation = self.race_generation + 1;
         let practice_selected = self.practice_selected;
         let race_mode_before_practice = self.race_mode_before_practice;
         *self = Self::from_sim(Sim::new_race_with_pace(
@@ -157,6 +165,7 @@ impl ShellSimulation {
         self.steering_response = response;
         self.camera_mode = camera_mode;
         self.generation = generation;
+        self.race_generation = race_generation;
         self.practice_selected = practice_selected;
         self.race_mode_before_practice = race_mode_before_practice;
         if practice_selected {
@@ -339,6 +348,21 @@ fn setup_car(mut commands: Commands, asset_server: Res<AssetServer>, sim: Res<Sh
                 CarSprite { car_index: i },
             ))
             .with_children(|car| {
+                if i == 0 {
+                    car.spawn((
+                        SpriteBundle {
+                            sprite: Sprite {
+                                color: palette::color(palette::CREAM_HIGHLIGHT),
+                                custom_size: Some(Vec2::new(0.375, 2.75)),
+                                ..default()
+                            },
+                            transform: Transform::from_xyz(2.125, 0.0, 0.06),
+                            visibility: Visibility::Hidden,
+                            ..default()
+                        },
+                        feedback::ImpactFlash,
+                    ));
+                }
                 for side in [-1.0, 1.0] {
                     car.spawn((
                         SpriteBundle {
@@ -453,8 +477,7 @@ pub fn read_keyboard_input(
 }
 
 /// Fixed step system: advances the simulation at 64 Hz using mapped player
-/// inputs. Cars with an AI driver compute their own input unless the player
-/// overrides it for that tick.
+/// inputs in Manual. Autopilot owns the player's entire input for the tick.
 fn step_simulation(
     mut shell: ResMut<ShellSimulation>,
     player_input: Res<PlayerInput>,
@@ -678,7 +701,8 @@ mod tests {
     #[test]
     fn toggling_to_manual_requires_held_controls_to_be_released() {
         let mut app = App::new();
-        let mut shell = ShellSimulation::new(Track::parse(SAMPLE_CIRCUIT).unwrap());
+        let mut shell =
+            ShellSimulation::from_sim(Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 1));
         shell
             .sim
             .request_player_mode(topdown_racer_core::simulation::DrivingMode::Autopilot);
@@ -720,7 +744,22 @@ mod tests {
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::KeyW);
         app.update();
-        assert_eq!(app.world().resource::<PlayerInput>().0.throttle, 1.0);
+        for _ in 0..32 {
+            app.update();
+            let snap = app.world().resource::<ShellSimulation>().curr_snapshots[0];
+            assert_eq!(snap.throttle, 1.0);
+        }
+        let driven = app.world().resource::<ShellSimulation>().curr_snapshots[0];
+        assert!(driven.forward_speed > 1.0);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        app.update();
+        let coast = app.world().resource::<ShellSimulation>().curr_snapshots[0];
+        assert_eq!(coast.throttle, 0.0);
+        assert_eq!(coast.steer, 0.0);
+        assert!(coast.forward_speed > 0.0);
+        assert!(coast.forward_speed < driven.forward_speed);
     }
 
     #[test]

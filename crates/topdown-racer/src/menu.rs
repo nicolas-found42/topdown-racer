@@ -77,7 +77,7 @@ pub fn spawn_menu_ui(
             ))
             .with_children(|button| {
                 button.spawn(TextBundle::from_section(
-                    "CORNER PRACTICE (P): same entry, timed section + exit speed",
+                    "CORNER PRACTICE (P): Hillside braking + right-left sequence\nSame rolling entry | timed cyan-to-white gates + exit speed | R: retry",
                     TextStyle {
                         font_size: 18.0,
                         color: Color::WHITE,
@@ -193,7 +193,7 @@ pub(crate) fn driving_summary(shell: &crate::ShellSimulation) -> String {
         .map(|ticks| format!("  |  FINISH WINDOW {:.1}s", ticks as f32 / 64.0))
         .unwrap_or_default();
     format!(
-        "YOU: BLUE CAR #1 | {}{}\nPACE: {}{} | STEERING: {}\nF: steering | V: camera {} (menu)",
+        "YOU: BLUE CAR #1 | {}{}\nPACE: {}{} | STEERING: {}\nF: Raw (instant) / Smooth (gentle rise, fast release)\nV: camera {} (menu)",
         shell.sim.player_mode().label(),
         if assisted { "  |  LAP ASSISTED" } else { "" },
         shell.selected_pace.label(),

@@ -3,7 +3,7 @@ use glam::Vec2;
 use topdown_racer_core::{
     ai::{AiDriver, AiView},
     simulation::{CarInput, GridCar, RacePhase, Sim},
-    track::{Track, HILLSIDE_CIRCUIT},
+    track::{Surface, Track, HILLSIDE_CIRCUIT},
 };
 fn adapt(applied: &mut f32, target: f32, rise: f32) -> f32 {
     if rise == 0.0 {
@@ -38,6 +38,12 @@ fn main() {
             }])[0]
                 .heading;
         }
+        let mut release_filter = filter;
+        let mut release_ticks = 0;
+        while release_filter != 0.0 {
+            adapt(&mut release_filter, 0.0, rise);
+            release_ticks += 1;
+        }
         for _ in 0..4 {
             adapt(&mut filter, -1.0, rise);
         }
@@ -46,6 +52,8 @@ fn main() {
         let mut driver = AiDriver::new(0);
         let mut filter = 0.0;
         let mut walls = 0;
+        let mut clean_laps = 0;
+        let mut lap_clean = true;
         let mut result = None;
         for _ in 0..16000 {
             let car = sim.snapshots()[0];
@@ -67,11 +75,18 @@ fn main() {
             input.steer = adapt(&mut filter, target, rise);
             let snapshot = sim.tick(&[input])[0];
             walls += usize::from(snapshot.wall_contact);
+            lap_clean &= !snapshot.wall_contact
+                && !snapshot.car_contact
+                && snapshot.surface == Surface::Road;
+            if snapshot.completed_laps > car.completed_laps {
+                clean_laps += usize::from(lap_clean);
+                lap_clean = true;
+            }
             if sim.phase() == RacePhase::Finished {
                 result = Some(snapshot.lap_times);
                 break;
             }
         }
-        println!("rise_ms={:.0}, pulse_degrees={:.3}, reversal_after_4ticks={:.3}, wall_ticks={}, laps={:?}",rise*1000.0,heading.to_degrees(),reversal,walls,result);
+        println!("rise_ms={:.0}, pulse_degrees={:.3}, reversal_after_4ticks={:.3}, release_ticks={}, wall_ticks={}, clean_laps={}, laps={:?}",rise*1000.0,heading.to_degrees(),reversal,release_ticks,walls,clean_laps,result);
     }
 }

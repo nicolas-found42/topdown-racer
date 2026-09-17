@@ -51,6 +51,9 @@ pub enum HudElement {
     Speed,
 }
 
+#[derive(Component)]
+pub(crate) struct OptionalHud;
+
 /// Spawns the HUD root and the centered countdown overlay text.
 pub(crate) fn setup_hud(mut commands: Commands) {
     let text_style = TextStyle {
@@ -78,9 +81,9 @@ pub(crate) fn setup_hud(mut commands: Commands) {
             HudRoot,
         ))
         .with_children(|root| {
-            root.spawn(TextBundle::from_section("T: toggle mode  |  W/S: throttle / brake + reverse  |  A/D: steer  |  Space: handbrake", TextStyle {
+            root.spawn((TextBundle::from_section("T: toggle mode  |  W/S: throttle / brake + reverse  |  A/D: steer  |  Space: handbrake", TextStyle {
                 font_size: 14.0, color: Color::WHITE, ..default()
-            }));
+            }), OptionalHud));
             root.spawn((TextBundle::from_section("", TextStyle {
                 font_size: 18.0, color: Color::srgb(1.0, 0.85, 0.3), ..default()
             }), crate::menu::DrivingSummary));
@@ -132,6 +135,7 @@ pub(crate) fn setup_hud(mut commands: Commands) {
                         right.spawn((
                             TextBundle::from_section("BEST --:--.--", text_style.clone()),
                             HudElement::BestTime,
+                            OptionalHud,
                         ));
                     });
             });
@@ -182,7 +186,28 @@ pub(crate) fn setup_hud(mut commands: Commands) {
 pub(crate) fn update_hud(
     shell: Res<ShellSimulation>,
     mut hud_query: Query<(&HudElement, &mut Text)>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    cameras: Query<&Camera, With<crate::FollowCamera>>,
+    mut optional: Query<&mut Style, With<OptionalHud>>,
 ) {
+    let show_optional = windows.get_single().is_ok_and(|window| {
+        cameras
+            .get_single()
+            .ok()
+            .and_then(|camera| camera.viewport.as_ref())
+            .is_some_and(|viewport| {
+                crate::awareness::optional_awareness_visible(
+                    viewport.physical_size.as_vec2() / window.scale_factor(),
+                )
+            })
+    });
+    for mut style in &mut optional {
+        style.display = if show_optional {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
     let Some(player_snap) = shell.curr_snapshots.first() else {
         return;
     };
@@ -191,7 +216,10 @@ pub(crate) fn update_hud(
         hud.lap = "CORNER PRACTICE".into();
         hud.position = "One Car | cyan entry, white exit".into();
         hud.current_lap_time = format!("SECTION {:.3}s", attempt.elapsed());
-        hud.best_lap_time = format!("TARGET {}", format_opt_lap_time(shell.practice_baseline));
+        hud.best_lap_time = format!(
+            "TARGET {}",
+            format_opt_lap_time(shell.practice_baseline.map(|best| best.seconds))
+        );
     }
 
     for (element, mut text) in hud_query.iter_mut() {

@@ -178,8 +178,9 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
         if (norm_prev - normal).length() > 0.001 {
             let kerb_w = 0.9;
             let kerb_len = 1.6;
-            // Place kerbs on the outer side (-normal side for CCW loop) so they
-            // sit in the runoff instead of overlapping the crossing leg's asphalt.
+            // Outside is right of a left turn, but left of a right turn.
+            // Using loop winding here puts right-turn kerbs across the road.
+            let outside = -dir_prev.perp_dot(dir).signum();
             // Incoming stretch towards corner
             for step in 0..4 {
                 let d_end = (step as f32) * kerb_len;
@@ -189,10 +190,10 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
                 let inner0 = track.road_half_width_at_arc(vertex_arc[i] - d_start);
                 let inner1 = track.road_half_width_at_arc(vertex_arc[i] - d_end);
                 geo.kerbs.push(Quad::new(
-                    pt0 - norm_prev * (inner0 + kerb_w),
-                    pt0 - norm_prev * inner0,
-                    pt1 - norm_prev * inner1,
-                    pt1 - norm_prev * (inner1 + kerb_w),
+                    pt0 + norm_prev * outside * (inner0 + kerb_w),
+                    pt0 + norm_prev * outside * inner0,
+                    pt1 + norm_prev * outside * inner1,
+                    pt1 + norm_prev * outside * (inner1 + kerb_w),
                 ));
             }
             // Outgoing stretch from corner
@@ -204,10 +205,10 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
                 let inner0 = track.road_half_width_at_arc(vertex_arc[i] + d_start);
                 let inner1 = track.road_half_width_at_arc(vertex_arc[i] + d_end);
                 geo.kerbs.push(Quad::new(
-                    pt0 - normal * (inner0 + kerb_w),
-                    pt0 - normal * inner0,
-                    pt1 - normal * inner1,
-                    pt1 - normal * (inner1 + kerb_w),
+                    pt0 + normal * outside * (inner0 + kerb_w),
+                    pt0 + normal * outside * inner0,
+                    pt1 + normal * outside * inner1,
+                    pt1 + normal * outside * (inner1 + kerb_w),
                 ));
             }
         }
@@ -275,6 +276,19 @@ pub fn build_track_geometry(track: &Track) -> TrackRenderGeometry {
 mod tests {
     use super::*;
     use topdown_racer_core::track::{ZoneKind, SAMPLE_CIRCUIT};
+
+    #[test]
+    fn hillside_kerbs_do_not_cut_across_the_driving_corridor() {
+        let track = Track::parse(topdown_racer_core::track::HILLSIDE_CIRCUIT).unwrap();
+        let geo = build_track_geometry(&track);
+        for kerb in geo.kerbs {
+            let center = quad_center(kerb);
+            assert!(
+                track.nearest_segment(center).distance >= track.road_half_width_at(center),
+                "kerb crosses usable road at {center:?}"
+            );
+        }
+    }
 
     #[test]
     fn sample_circuit_geometry_counts_match_segments_and_grid() {

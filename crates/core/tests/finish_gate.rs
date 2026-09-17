@@ -100,6 +100,25 @@ fn directional_gate_accepts_swept_forward_crossings_only_inside_its_width() {
 }
 
 #[test]
+fn diagonal_sweep_checks_width_at_the_gate_not_at_either_endpoint() {
+    let gate = topdown_racer_core::track::DirectionalGate {
+        center: Vec2::new(10.0, 20.0),
+        direction: Vec2::Y,
+        half_width: 5.0,
+    };
+    // Both sampled poses are outside the lateral bounds, but the sweep passes
+    // through the checker center. Endpoint-only bounds would miss this lap.
+    assert!(gate.crossed(Vec2::new(0.0, 10.0), Vec2::new(20.0, 30.0)));
+    // Ending inside the bounds is insufficient when the intersection was wide.
+    assert!(!gate.crossed(Vec2::new(30.0, 19.0), Vec2::new(10.0, 30.0)));
+    // Landing on the plane defers credit until moving forward off it, so a
+    // stationary sample cannot double-count a crossing at an exact tick edge.
+    assert!(!gate.crossed(Vec2::new(10.0, 19.0), gate.center));
+    assert!(!gate.crossed(gate.center, gate.center));
+    assert!(gate.crossed(gate.center, Vec2::new(10.0, 21.0)));
+}
+
+#[test]
 fn equal_tick_finish_uses_stable_grid_order() {
     use topdown_racer_core::{
         ai::{AiDriver, AiView},

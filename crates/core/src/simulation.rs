@@ -379,10 +379,9 @@ impl Sim {
         };
     }
 
-    /// Advances the world one fixed step. For player-controlled cars, inputs are
-    /// consumed from `inputs` (defaulting to neutral if missing). For AI-controlled
-    /// cars, the internal AI driver computes input unless overridden by an explicit
-    /// entry in `inputs`.
+    /// Advances the world one fixed step. Manual Cars consume `inputs`, defaulting
+    /// to neutral. Player Autopilot ignores external input completely. Explicit
+    /// non-neutral inputs can override AI Opponents for headless scenarios.
     pub fn tick(&mut self, inputs: &[CarInput]) -> Vec<CarSnapshot> {
         if self.paused {
             return self.snapshots();
@@ -620,9 +619,12 @@ impl Sim {
             .sum();
         let pose = self.track.point_at_arc(arc - 5.0);
         let direction = self.track.centerline_frame(pose).direction;
-        if self.cars.iter().skip(1).any(|rival| {
-            rival.finish_status == FinishStatus::Racing && rival.pose.distance(pose) < 6.0
-        }) {
+        if self
+            .cars
+            .iter()
+            .skip(1)
+            .any(|rival| rival.pose.distance(pose) < 6.0)
+        {
             return Err(RecoveryError::Occupied);
         }
         let car = &mut self.cars[0];
@@ -2126,15 +2128,17 @@ mod tests {
         sim.enable_ai_opponents();
         sim.set_ai(0, Some(AiDriver::new(0)));
 
-        // Measured 2026-09-07 over this exact race: 4921 ticks, 0 wall
-        // contacts, 0 off-track ticks, 34 drift ticks (0.17%). The sim is
-        // deterministic, so these pins are stable; any wall hit is a driving
-        // regression, not noise.
+        // Preserve the clean four-Car bar without manufacturing overtakes.
+        // Encounter diagnostics distinguish clean running from time spent
+        // racing nearby Cars; scenario tests exercise actual passing moves.
         let mut wall_ticks = 0u32;
         let mut grass_ticks = 0u32;
         let mut drift_ticks = 0u32;
         let mut race_ticks = 0u32;
         let mut leader_best = f32::INFINITY;
+        let mut contacts = 0;
+        let mut max_contact_speed = 0.0_f32;
+        let mut near_pair_ticks = 0;
         let mut finished = false;
         for _ in 0..8000 {
             let snaps = sim.tick(&[CarInput::default()]);
@@ -2142,6 +2146,14 @@ mod tests {
             wall_ticks += snaps.iter().filter(|s| s.wall_contact).count() as u32;
             grass_ticks += snaps.iter().filter(|s| s.surface == Surface::Grass).count() as u32;
             drift_ticks += snaps.iter().filter(|s| s.drifting).count() as u32;
+            contacts += snaps.iter().filter(|s| s.car_contact).count();
+            for (i, snap) in snaps.iter().enumerate() {
+                max_contact_speed = max_contact_speed.max(snap.car_contact_speed);
+                near_pair_ticks += snaps[i + 1..]
+                    .iter()
+                    .filter(|rival| snap.pose.distance(rival.pose) < 28.0)
+                    .count();
+            }
             if snaps.iter().all(|s| s.phase == RacePhase::Finished) {
                 leader_best = snaps
                     .iter()
@@ -2151,6 +2163,8 @@ mod tests {
                 break;
             }
         }
+        eprintln!("clean field: ticks={race_ticks}, pass_stats={:?}, contacts={contacts}, severity={max_contact_speed}, near_pair_ticks={near_pair_ticks}, wall_ticks={wall_ticks}, grass_ticks={grass_ticks}, drift_ticks={drift_ticks}, leader_best={leader_best}", (0..4).map(|i| sim.pass_stats(i)).collect::<Vec<_>>());
+        assert_eq!(contacts, 0, "a clean field must not contact rival Cars");
 
         assert!(finished, "the AI field must complete the 3-lap race");
         assert_eq!(wall_ticks, 0, "AI must not touch walls on a clean race");
@@ -2654,6 +2668,80 @@ mod tests {
             overlapped,
             "the fixture must actually coast the finished car through the rival"
         );
+    }
+
+    #[test]
+    fn recovery_respects_finished_car_clearance() {
+        let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 2);
+        sim.cars[0].pose = Vec2::new(50.0, 40.0);
+        sim.cars[1].pose = sim.track.spawn_pose(5.0);
+        sim.cars[1].finish_status = FinishStatus::Finished { place: 1 };
+        let before = sim.snapshots();
+        assert_eq!(sim.recover_player(), Err(RecoveryError::Occupied));
+        assert_eq!(sim.snapshots(), before);
+    }
+
+    #[test]
+    fn recovery_before_and_after_the_seam_cannot_credit_progress() {
+        let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 1);
+        walk_ordered_checkpoints(&mut sim);
+        sim.cars[0].velocity = Vec2::ZERO;
+        let next = sim.cars[0].next_checkpoint;
+        sim.recover_player().unwrap();
+        assert_eq!(sim.cars[0].next_checkpoint, next);
+        assert_eq!(sim.cars[0].completed_laps, 0);
+        assert_eq!(sim.cars[0].last_cleared_checkpoint, 6);
+        assert_eq!(
+            sim.cars[0].pose,
+            sim.track.point_at_arc(
+                sim.track.total_length() - sim.track.points[6].distance(sim.track.points[7]) - 5.0
+            )
+        );
+        // Finish the invalidated lap, then recover just after the seam.
+        cross_checkpoint(&mut sim, Vec2::ZERO, Vec2::new(2000.0, 0.0));
+        sim.cars[0].last_recovery_tick = None;
+        sim.cars[0].velocity = Vec2::ZERO;
+        sim.recover_player().unwrap();
+        assert_eq!(sim.cars[0].completed_laps, 1);
+        assert_eq!(sim.cars[0].last_cleared_checkpoint, 0);
+        assert_eq!(sim.cars[0].next_checkpoint, 1);
+        assert_eq!(sim.cars[0].pose, sim.track.spawn_pose(5.0));
+        // Crossing the checker again cannot increment a lap without the route.
+        let snap = cross_checkpoint(&mut sim, Vec2::ZERO, Vec2::new(2000.0, 0.0));
+        assert_eq!(snap.completed_laps, 1);
+        assert!(snap.current_lap_invalidated);
+    }
+
+    #[test]
+    fn finish_window_and_finished_cars_stay_frozen_through_resume() {
+        let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 2);
+        for _ in 0..TOTAL_LAPS {
+            walk_ordered_checkpoints(&mut sim);
+            cross_checkpoint(&mut sim, Vec2::ZERO, Vec2::new(2000.0, 0.0));
+        }
+        assert_eq!(sim.phase(), RacePhase::Racing);
+        assert_eq!(sim.recover_player(), Err(RecoveryError::Unavailable));
+        let winner_tick = sim.winner_tick.unwrap();
+        let frozen = sim.snapshots();
+        let racing_ticks = sim.racing_ticks();
+        sim.pause();
+        for _ in 0..4000 {
+            assert_eq!(sim.tick(&[]), frozen);
+            assert_eq!(sim.racing_ticks(), racing_ticks);
+            assert_eq!(sim.phase(), RacePhase::Racing);
+        }
+        sim.resume();
+        for _ in 0..64 {
+            assert_eq!(sim.tick(&[]), frozen);
+        }
+        assert_eq!(sim.winner_tick, Some(winner_tick));
+        for _ in 0..45 * 64 - 1 {
+            sim.tick(&[]);
+            assert_eq!(sim.phase(), RacePhase::Racing);
+        }
+        sim.tick(&[]);
+        assert_eq!(sim.phase(), RacePhase::Finished);
+        assert_eq!(sim.snapshots()[1].finish_status, FinishStatus::Dnf);
     }
 
     #[test]

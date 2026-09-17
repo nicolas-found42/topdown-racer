@@ -132,6 +132,46 @@ fn established_inside_overlap_prevents_turning_across_the_other_car() {
 }
 
 #[test]
+fn seam_overlap_reserves_both_sides_until_the_car_is_fully_clear() {
+    let track = passing_track(20.0);
+    // The seam is x=0 on the same straight: one Car projects near the end
+    // of the loop while the other projects near its beginning.
+    for side in [-1.0, 1.0] {
+        for gap in [-4.4_f32, 4.4] {
+            let mut driver = AiDriver::new(1);
+            let me = (Vec2::new(-gap / 2.0, side * 3.2), Vec2::new(12.0, 0.0));
+            let rival = (Vec2::new(gap / 2.0, 0.0), Vec2::new(12.0, 0.0));
+            let input = driver.compute_input(AiView {
+                active: None,
+                car_index: 0,
+                pose: me.0,
+                heading: 0.0,
+                velocity: me.1,
+                track: &track,
+                field: &[me, rival],
+            });
+            assert!(input.steer * side >= -0.001, "must not close the reserved lane across the seam: gap={gap}, side={side}, {input:?}");
+        }
+        // Once the rival is wholly behind, return to the normal line.
+        let me = (Vec2::new(2.25, side * 3.2), Vec2::new(12.0, 0.0));
+        let rival = (Vec2::new(-2.25, 0.0), Vec2::new(12.0, 0.0));
+        let input = AiDriver::new(1).compute_input(AiView {
+            active: None,
+            car_index: 0,
+            pose: me.0,
+            heading: 0.0,
+            velocity: me.1,
+            track: &track,
+            field: &[me, rival],
+        });
+        assert!(
+            input.steer * side < -0.1,
+            "fully clear Car may return to the normal line: {input:?}"
+        );
+    }
+}
+
+#[test]
 fn no_safe_pass_corridor_waits_without_reverse_or_repeated_attempts() {
     let track = passing_track(6.0);
     let mut driver = AiDriver::new(1);
