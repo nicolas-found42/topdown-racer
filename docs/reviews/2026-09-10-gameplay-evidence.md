@@ -11,17 +11,34 @@ The full-Race comparison quantizes the same deterministic driver's steering to
 left/neutral/right before applying each candidate response. This is a synthetic
 controller experiment, not evidence of human preference.
 
-| Rise | Eight-tick heading change | Steering after four reversal ticks | Wall-contact ticks in three laps | Flying laps (s) |
-| --- | ---: | ---: | ---: | --- |
-| Raw | 22.918 degrees | -1.000 | 0 | 29.266, 29.219 |
-| 50 ms | 20.796 degrees | -0.250 | 0 | 29.875, 29.984 |
-| 100 ms | 17.367 degrees | -0.250 | 0 | 29.641, 29.656 |
-| 150 ms | 13.600 degrees | -0.208 | 0 | 29.500, 29.516 |
+| Rise | Eight-tick heading change | Steering after four reversal ticks | Release-to-neutral ticks | Wall-contact ticks in three laps | Clean laps (no wall/car contact, Road) | Flying laps (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Raw | 22.918 degrees | -1.000 | 1 | 0 | 3 | 29.266, 29.219 |
+| 50 ms | 20.796 degrees | -0.250 | 4 | 0 | 3 | 29.875, 29.984 |
+| 100 ms | 17.367 degrees | -0.250 | 4 | 0 | 3 | 29.641, 29.656 |
+| 150 ms | 13.600 degrees | -0.208 | 3 | 0 | 3 | 29.500, 29.516 |
 
 Raw stays default. The selectable 100 ms Smooth response reduces the measured
 short correction without the larger initial delay of 150 ms; reversal uses the
-faster return rate. No claim is made that this is the fastest or preferred human
-setting. Sustained human comparison remains untested.
+faster return rate. Sustained human comparison remains untested. The steering
+echo in the snapshot is the filtered command actually reaching Car physics in
+Manual, so replaying an echo sequence reproduces the same snapshots; Bevy's
+fixed-step accumulator makes the effective command stream identical at any
+render cadence. Automated lap speed is not evidence of human feel, and no such
+claim is made here.
+
+Boundary regression coverage pins the applied echo sequence, release and
+reversal, immediate neutral when both steering directions are held, Autopilot
+and AI Opponent bypass, mode-toggle ownership reset, menu selection through the
+lifecycle state machine, focus-loss pause, and restart with a clean filter
+while the chosen Raw/Smooth policy persists. The native `issue51_capture`
+example exercised the real window surface: menu text renders the Raw/Smooth
+explanation, the F key flips the policy, the applied echo ramped 0.15625→1.0
+over the held ticks and returned 0.6875→0 within two ticks of release, and
+Esc/R restart cleared to zero steering with the Smooth policy intact. Screens:
+`.scratch/issue-51/{raw-menu,smooth-menu,steering,release,restart}.png`.
+These captures verify control selection, steering, release, and restart on the
+real surface, not human preference.
 
 ## Hillside sequence and choices (#43, #53, #57)
 

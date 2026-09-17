@@ -21,6 +21,9 @@ mod results;
 mod track_geometry;
 pub mod world_bake;
 
+#[cfg(test)]
+mod steering_tests;
+
 pub use audio::{
     create_pcm_wav, engine_pitch_from_speed, generate_engine_loop_wav, generate_skid_loop_wav,
     mute_audio, skid_volume_from_drift, unmute_audio, update_audio, EngineAudio, SkidAudio,
