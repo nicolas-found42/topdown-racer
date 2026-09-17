@@ -28,3 +28,34 @@ vision-model transcriptions of each PNG, quoted with their caveats.
   the 45 s window expired — itself a valid finish-window observation.
 - Superseded temp captures (pre-game desktop probes, mid-sequence duplicates)
   were left in the OS temp dir, not copied.
+
+## Follow-up verification (2026-09-17, issue/49-manual-driving-default)
+
+The existing numbered captures above are historical evidence, not reruns on
+this branch. No Computer Use device was mounted for this follow-up; the native
+game was driven with System Events discrete keys and CoreGraphics HID key-down
+and key-up events. The process was explicitly made frontmost. A two-second W
+hold, followed by release and two seconds without input, produced:
+
+| File | Observed state |
+|---|---|
+| `28-native-throttle-release.png` | Immediately after held W release: `MANUAL`, `SPEED 25 u/s`, lap time `00:40.78` |
+| `29-native-coast.png` | Two seconds after release: `MANUAL`, `SPEED 6 u/s`, lap time `00:42.86` |
+| `30-native-steering-release.png` | After a one-second W+A hold and release: `MANUAL`, `SPEED 16 u/s` |
+| `21-manual-after-toggle.png` | T back from Autopilot: `MANUAL | LAP ASSISTED`, `SPEED 8 u/s` |
+| `22-paused-label.png` | Pause retains `MANUAL | LAP ASSISTED` |
+| `23-after-resume-label.png` | Resume preparation (`READY`) retains `MANUAL | LAP ASSISTED` |
+
+Held-input latching and release/coasting are additionally asserted through the
+real shell keyboard mapping and simulation systems in
+`toggling_to_manual_requires_held_controls_to_be_released`. A fresh menu selection
+after returning from pause and a paused T press followed by resume are covered
+by dedicated lifecycle regressions. All 198 workspace tests pass.
+
+Limitations: the native run displayed the Track, HUD and minimap but not the Car
+sprites, so steering direction cannot be visually certified from these captures.
+The no-input follow-up capture briefly reported 2 u/s (cause not established);
+it does not prove exact stationarity. Historical capture 03 and the deterministic
+neutral-input test provide that evidence. The historical minimum-window result
+capture remains the 640x360 evidence; follow-up captures use 1280x720. Discarded
+follow-up shots captured a terminal or a paused game and are not driving proof.

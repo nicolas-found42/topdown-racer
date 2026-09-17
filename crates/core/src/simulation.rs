@@ -379,10 +379,9 @@ impl Sim {
         };
     }
 
-    /// Advances the world one fixed step. For player-controlled cars, inputs are
-    /// consumed from `inputs` (defaulting to neutral if missing). For AI-controlled
-    /// cars, the internal AI driver computes input unless overridden by an explicit
-    /// entry in `inputs`.
+    /// Advances the world one fixed step. Manual Cars consume `inputs`, defaulting
+    /// to neutral. Player Autopilot ignores external input completely. Explicit
+    /// non-neutral inputs can override AI Opponents for headless scenarios.
     pub fn tick(&mut self, inputs: &[CarInput]) -> Vec<CarSnapshot> {
         if self.paused {
             return self.snapshots();
