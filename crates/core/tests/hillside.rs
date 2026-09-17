@@ -30,6 +30,17 @@ fn hillside_grid_races_cleanly_with_deterministic_results() {
             assert!(snapshots
                 .iter()
                 .all(|c| matches!(c.finish_status, FinishStatus::Finished { .. })));
+            // Exclude the standing-start lap: grid position and acceleration
+            // make it slower than the circuit's intended ~30-second pace.
+            for car in &snapshots {
+                assert!(car.lap_times.iter().all(Option::is_some));
+                for lap in car.lap_times.iter().skip(1).flatten() {
+                    assert!(
+                        (27.0..=33.0).contains(lap),
+                        "Hillside flying lap must stay within 10% of 30 s, got {lap} s"
+                    );
+                }
+            }
             return;
         }
     }
