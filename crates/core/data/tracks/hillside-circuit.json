@@ -122,8 +122,8 @@
     {
       "type": "brake_board",
       "position": [
-        119,
-        65
+        117,
+        62
       ]
     },
     {
@@ -157,7 +157,7 @@
     {
       "type": "tire_stack",
       "position": [
-        160,
+        169,
         35
       ]
     }
