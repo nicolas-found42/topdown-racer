@@ -203,6 +203,7 @@ mod tests {
             practice_baseline: None,
             camera_mode: Default::default(),
             generation: 0,
+            race_generation: 0,
             steering_response: Default::default(),
             selected_pace: Default::default(),
             curr_snapshots: sim.snapshots(),

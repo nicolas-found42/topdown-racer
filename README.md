@@ -55,6 +55,11 @@ and is not compared against current records.
 Pause freezes Race time. Resume has a one-second preparation interval. Recovery
 requires speed below 1 world unit/s and an unoccupied destination; it invalidates
 the current lap and has a three-second simulation-time cooldown.
+Skid marks survive Recovery and the results screen; a fresh Race clears them.
+The renderer retains at most 2048 tire-mark quads, evicting the oldest first.
+Issue #45 capture evidence: [mid-Drift](docs/reviews/issue-45/mid-drift.png) and
+[post-race](docs/reviews/issue-45/post-race.png). The latter shows the curved trail
+through the dim results overlay, above and to the right of the finish line.
 
 
 Corner Practice starts one Car at the same rolling speed before the braking and
