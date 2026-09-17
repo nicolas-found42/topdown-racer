@@ -131,3 +131,31 @@ fn moving_rejoin_aborts_the_pass_without_contact() {
     );
     assert!(stats.attempted >= 1 && stats.aborted >= 1);
 }
+
+#[test]
+fn overlapping_cars_leave_room_through_turn_in() {
+    let mut sim = Sim::from_grid(
+        Track::parse(topdown_racer_core::track::SAMPLE_CIRCUIT).unwrap(),
+        &[car(106.0, -2.0, 12.0), car(106.0, 1.2, 12.0)],
+    );
+    sim.set_ai(0, Some(AiDriver::new(0)));
+    sim.set_ai(1, Some(AiDriver::new(1)));
+    let mut near = 0;
+    for tick in 0..240 {
+        let snaps = sim.tick(&[]);
+        near += usize::from(snaps[0].pose.distance(snaps[1].pose) < 28.0);
+        assert!(
+            snaps.iter().all(|s| !s.car_contact && !s.wall_contact),
+            "turn-in contact at {tick}: {snaps:?}"
+        );
+    }
+    assert!(
+        sim.snapshots().iter().all(|s| s.pose.y > 5.0),
+        "both Cars must negotiate the corner, not stop to avoid contact"
+    );
+    eprintln!(
+        "turn-in overlap: stats={:?}/{:?}, contacts=0, severity=0, near_ticks={near}",
+        sim.pass_stats(0),
+        sim.pass_stats(1)
+    );
+}

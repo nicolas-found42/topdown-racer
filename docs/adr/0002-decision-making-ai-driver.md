@@ -9,3 +9,35 @@ Replay determinism is load-bearing (the sim is a bit-for-bit function of the inp
 Validated empirically, not by formula: a full 4-AI race on the sample circuit finishes in 4921 ticks with 0 wall contacts, 0 off-track ticks, 0.17% drift, leader laps ~25.4 s — pinned by `ai_field_races_three_laps_cleanly`. Corner apexes sit at ~13–14 u/s against a ~24.6 cruise, pinned by the speed-profile test.
 
 Considered and rejected: scoring-based or randomized planners (unverifiable against replay determinism); accelerating through overtakes instead of lift-and-pass (ramming risk; the measured pass costs ~2 s behind a parked car, which is correct caution); keeping the waypoint follower with tuned constants (caps out at line-following, answers none of the ask).
+
+## Fixed pace and clean passing (#54)
+
+The menu fixes one opponent pace for the Race, retained on restart and shown in
+the Race and results: Touring uses 0.70, Club 0.85, and Race 1.0 of the planned
+speed envelope. Each grid slot retains its deterministic 0.88–1.0 skill and
+0.5–1.0 aggression; pace does not alter aggression, engine, braking, grip,
+collision response, or speed according to race position.
+
+A pass commits to one rival and one lateral corridor. Clearance considers
+current and projected rival lateral movement. A blocked corridor, lost target,
+or six-second attempt causes an abort and 1.5 seconds of following before a
+new attempt. A clear move completes only when the rival is seven units behind.
+The driver never changes the side of an active commitment. Following a stopped
+Car on the road does not count as being stuck; reverse recovery remains for
+unobstructed failure to make progress or facing away off-road.
+
+Established overlap means the Cars' nose-to-tail extents overlap along the
+local Track direction (center gap at most 4.4 units, with 0.01 tolerance), with
+centers on distinct lateral lines (more than 0.5 units apart). The AI Opponent
+reserves the other Car's occupied side until fully clear: no defensive move or
+apex choice may close a corridor of one Car width plus 0.6 units (3.2 total).
+Both sides receive the same protection, including across the Track seam. When
+the road cannot hold all reserved corridors, hold the current line and slow
+rather than select a new defensive side. This is a local sportsmanship rule,
+not an entitlement to force another Car off the road.
+
+Encounter tests exercise the policy in motion, with pass counts, contact
+severity and time near rivals. A clean field Race is not required to invent
+overtakes; solo pace ordering and purpose-built passing opportunities measure
+different contracts. Static perception tests pin the turn-in and seam overlap
+boundaries; moving encounters prove that steering decisions avoid contact.
