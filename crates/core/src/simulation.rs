@@ -2126,15 +2126,17 @@ mod tests {
         sim.enable_ai_opponents();
         sim.set_ai(0, Some(AiDriver::new(0)));
 
-        // Measured 2026-09-07 over this exact race: 4921 ticks, 0 wall
-        // contacts, 0 off-track ticks, 34 drift ticks (0.17%). The sim is
-        // deterministic, so these pins are stable; any wall hit is a driving
-        // regression, not noise.
+        // Preserve the clean four-Car bar without manufacturing overtakes.
+        // Encounter diagnostics distinguish clean running from time spent
+        // racing nearby Cars; scenario tests exercise actual passing moves.
         let mut wall_ticks = 0u32;
         let mut grass_ticks = 0u32;
         let mut drift_ticks = 0u32;
         let mut race_ticks = 0u32;
         let mut leader_best = f32::INFINITY;
+        let mut contacts = 0;
+        let mut max_contact_speed = 0.0_f32;
+        let mut near_pair_ticks = 0;
         let mut finished = false;
         for _ in 0..8000 {
             let snaps = sim.tick(&[CarInput::default()]);
@@ -2142,6 +2144,14 @@ mod tests {
             wall_ticks += snaps.iter().filter(|s| s.wall_contact).count() as u32;
             grass_ticks += snaps.iter().filter(|s| s.surface == Surface::Grass).count() as u32;
             drift_ticks += snaps.iter().filter(|s| s.drifting).count() as u32;
+            contacts += snaps.iter().filter(|s| s.car_contact).count();
+            for (i, snap) in snaps.iter().enumerate() {
+                max_contact_speed = max_contact_speed.max(snap.car_contact_speed);
+                near_pair_ticks += snaps[i + 1..]
+                    .iter()
+                    .filter(|rival| snap.pose.distance(rival.pose) < 28.0)
+                    .count();
+            }
             if snaps.iter().all(|s| s.phase == RacePhase::Finished) {
                 leader_best = snaps
                     .iter()
@@ -2151,6 +2161,8 @@ mod tests {
                 break;
             }
         }
+        eprintln!("clean field: ticks={race_ticks}, pass_stats={:?}, contacts={contacts}, severity={max_contact_speed}, near_pair_ticks={near_pair_ticks}, wall_ticks={wall_ticks}, grass_ticks={grass_ticks}, drift_ticks={drift_ticks}, leader_best={leader_best}", (0..4).map(|i| sim.pass_stats(i)).collect::<Vec<_>>());
+        assert_eq!(contacts, 0, "a clean field must not contact rival Cars");
 
         assert!(finished, "the AI field must complete the 3-lap race");
         assert_eq!(wall_ticks, 0, "AI must not touch walls on a clean race");
