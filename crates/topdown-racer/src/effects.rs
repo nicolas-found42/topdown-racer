@@ -501,6 +501,7 @@ mod skid_lifecycle_tests {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use topdown_racer_core::{
@@ -604,5 +605,140 @@ mod tests {
             effects.particles.is_empty(),
             "finished and removed Cars leave no smoke"
         );
+    }
+}
+
+#[cfg(test)]
+mod dust_streak_tests {
+    use super::*;
+    use topdown_racer_core::{
+        simulation::{CarSnapshot, GridCar, Sim},
+        track::{Surface, Track, SAMPLE_CIRCUIT},
+    };
+
+    fn effects() -> DrivingEffects {
+        DrivingEffects {
+            generation: 0,
+            decals: SkidDecals::new(0),
+            race_generation: 0,
+            particles: VecDeque::new(),
+            tick: 0,
+        }
+    }
+
+    fn snapshots(surface: Surface, speed: f32) -> Vec<CarSnapshot> {
+        let mut track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        track.surfaces.fill(surface);
+        Sim::from_grid(
+            track,
+            &[GridCar {
+                pose: Vec2::new(20.0, 0.0),
+                heading: 0.0,
+                velocity: Vec2::new(speed, 0.0),
+            }; 4],
+        )
+        .snapshots()
+    }
+
+    fn advance(cars: &[CarSnapshot], effects: &mut DrivingEffects, ticks: usize) {
+        for _ in 0..ticks {
+            step_particles(cars, effects);
+        }
+    }
+
+    #[test]
+    fn moving_cars_raise_dust_on_gravel_and_grass_but_not_road() {
+        for surface in [Surface::Road, Surface::Gravel, Surface::Grass] {
+            let cars = snapshots(surface, 10.0);
+            assert!(cars.iter().all(|car| car.surface == surface));
+            let mut effects = effects();
+            advance(&cars, &mut effects, 4);
+            assert_eq!(
+                effects
+                    .particles
+                    .iter()
+                    .filter(|p| matches!(p.kind, ParticleKind::Dust))
+                    .count(),
+                if surface == Surface::Road { 0 } else { 4 },
+                "{surface:?}"
+            );
+            assert!(!effects
+                .particles
+                .iter()
+                .any(|p| matches!(p.kind, ParticleKind::Streak)));
+        }
+        // Off-track grass comes from the Track query, not an authored Terrain Zone.
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let cars = Sim::from_grid(
+            track,
+            &[GridCar {
+                pose: Vec2::new(20.0, 8.0),
+                heading: 0.0,
+                velocity: Vec2::new(10.0, 0.0),
+            }],
+        )
+        .snapshots();
+        assert_eq!(cars[0].surface, Surface::Grass);
+        let mut effects = effects();
+        advance(&cars, &mut effects, 4);
+        assert!(effects
+            .particles
+            .iter()
+            .any(|p| matches!(p.kind, ParticleKind::Dust)));
+    }
+
+    #[test]
+    fn only_the_player_leaves_streaks_above_the_speed_threshold() {
+        let mut cars = snapshots(Surface::Road, 30.0);
+        for (i, car) in cars.iter_mut().enumerate() {
+            car.pose += Vec2::new(0.0, i as f32 * 20.0);
+        }
+        let mut effects = effects();
+        advance(&cars, &mut effects, 4);
+        assert_eq!(effects.particles.len(), 2);
+        assert!(
+            effects
+                .particles
+                .iter()
+                .all(|p| matches!(p.kind, ParticleKind::Streak)
+                    && p.pose.distance(cars[0].pose) < 5.0)
+        );
+
+        // Fast rivals cannot trigger player streaks at or below the cutoff.
+        for speed in [0.0, 10.0, 26.0] {
+            cars[0].velocity = Vec2::new(speed, 0.0);
+            effects.particles.clear();
+            advance(&cars, &mut effects, 4);
+            assert!(effects.particles.is_empty(), "player speed {speed}");
+        }
+    }
+
+    #[test]
+    fn stopping_emission_expires_dust_and_streaks() {
+        let mut cars = snapshots(Surface::Gravel, 30.0);
+        let mut effects = effects();
+        advance(&cars, &mut effects, 4);
+        assert!(effects
+            .particles
+            .iter()
+            .any(|p| matches!(p.kind, ParticleKind::Dust)));
+        assert!(effects
+            .particles
+            .iter()
+            .any(|p| matches!(p.kind, ParticleKind::Streak)));
+        for car in &mut cars {
+            car.velocity = Vec2::ZERO;
+        }
+        advance(&cars, &mut effects, 8);
+        assert!(!effects
+            .particles
+            .iter()
+            .any(|p| matches!(p.kind, ParticleKind::Streak)));
+        assert!(effects
+            .particles
+            .iter()
+            .any(|p| matches!(p.kind, ParticleKind::Dust)));
+        advance(&cars, &mut effects, 16);
+        assert!(effects.particles.is_empty());
     }
 }
