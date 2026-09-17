@@ -63,3 +63,22 @@ the white exit gate in order. Results compare elapsed section time and exit
 speed; R or Enter retries. Its records are separate from Race laps. Raw steering
 remains the default; Smooth uses roughly 100 ms rise with faster release/reversal.
 Human preference and audio audition are not inferred from automated tests.
+
+Look Ahead keeps the same world-aligned 80-by-45 view and pixel density as
+Centered. It previews velocity (including sideways Drift and reverse), not the
+Car's nose: a 2 world unit/s dead zone, smoothed 0.4-second lead, and a radial
+10-unit cap keep the Car visible. At 29 units/s the settled vertical preview
+grows from 22.5 to 32.5 units (about 0.78 to 1.12 seconds, a 44% improvement).
+Restart clears camera history. The numbered Track overview uses each Car's
+Livery and a cyan player ring; nearby racing rivals outside the view get
+Livery-colored edge chevrons only within 60 world units of the player. This
+threshold shows immediate off-screen company without tracking the distant field.
+The overview, chevrons, control hint, and optional best-time line hide when the
+play viewport is smaller than 800-by-450 logical pixels; lap, position, current
+time, and speed remain visible.
+
+Native rendered screenshot review for #52 covered horizontal/vertical approaches,
+Drift/reverse snapshots, separated rivals, and wide/tall/small windows. These were
+scripted presentation snapshots, not human driving or motion-comfort testing;
+smoothness preference and motion comfort remain untested. Captures retained the
+fixture's GO overlay (and one focus-loss pause overlay), not a live Race sequence.

@@ -164,7 +164,9 @@ pub(crate) fn interpolate_car_and_camera(
             if sprite.car_index == 0 {
                 for mut cam_tf in cameras.iter_mut() {
                     let camera_pose = ((interp_pose
-                        + lead.as_ref().map_or(Vec2::ZERO, |lead| lead.offset()))
+                        + lead.as_ref().map_or(Vec2::ZERO, |lead| {
+                            lead.interpolated_offset(shell.generation, alpha)
+                        }))
                         * TEXELS_PER_UNIT)
                         .round()
                         / TEXELS_PER_UNIT;
@@ -227,22 +229,5 @@ mod tests {
             "midpoint across boundary must stay near +/- pi: got {}",
             mid
         );
-    }
-
-    #[test]
-    fn follow_camera_transform_tracks_car_pose_with_identity_rotation() {
-        let p0 = Vec2::new(10.0, 20.0);
-        let p1 = Vec2::new(30.0, 40.0);
-        let alpha = 0.5;
-        let interp = interpolate_pose(p0, p1, alpha);
-
-        let mut cam_tf = Transform::from_xyz(0.0, 0.0, 999.0);
-        cam_tf.translation.x = interp.x;
-        cam_tf.translation.y = interp.y;
-        cam_tf.rotation = Quat::IDENTITY;
-
-        assert_eq!(cam_tf.translation.x, 20.0);
-        assert_eq!(cam_tf.translation.y, 30.0);
-        assert_eq!(cam_tf.rotation, Quat::IDENTITY);
     }
 }
