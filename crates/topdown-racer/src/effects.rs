@@ -181,7 +181,7 @@ pub const PARTICLE_BUDGET: usize = 128;
 
 #[derive(Clone, Copy)]
 enum ParticleKind {
-    Smoke,
+    Smoke(usize),
     Dust,
     Streak,
 }
@@ -226,12 +226,18 @@ fn step_particles(
     for particle in &mut effects.particles {
         particle.age += 1;
     }
-    effects.particles.retain(|p| {
-        p.age
-            < match p.kind {
-                ParticleKind::Streak => 8,
-                _ => 24,
-            }
+    effects.particles.retain(|p| match p.kind {
+        // Smoke must disappear on release, even between emission ticks.
+        ParticleKind::Smoke(car_index) => {
+            p.age < 24
+                && cars.get(car_index).is_some_and(|car| {
+                    car.handbrake
+                        && car.phase == topdown_racer_core::simulation::RacePhase::Racing
+                        && car.finish_status == topdown_racer_core::simulation::FinishStatus::Racing
+                })
+        }
+        ParticleKind::Streak => p.age < 8,
+        ParticleKind::Dust => p.age < 24,
     });
     if !effects.tick.is_multiple_of(4) {
         return;
@@ -250,7 +256,7 @@ fn step_particles(
                 effects.particles.push_back(Particle {
                     pose: car.pose - forward * 1.5 + left * side,
                     heading: car.heading,
-                    kind: ParticleKind::Smoke,
+                    kind: ParticleKind::Smoke(i),
                     age: 0,
                 });
             }
@@ -303,9 +309,9 @@ fn render_particles(
         };
         let alpha = 1.0 - particle.age as f32 / lifetime;
         match particle.kind {
-            ParticleKind::Smoke | ParticleKind::Dust => {
+            ParticleKind::Smoke(_) | ParticleKind::Dust => {
                 *texture = match particle.kind {
-                    ParticleKind::Smoke => textures.smoke.clone(),
+                    ParticleKind::Smoke(_) => textures.smoke.clone(),
                     _ => textures.dust.clone(),
                 };
                 sprite.custom_size = Some(Vec2::splat(2.0));
@@ -340,5 +346,111 @@ fn render_brake_lights(
         } else {
             Visibility::Hidden
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use topdown_racer_core::{
+        simulation::{CarInput, FinishStatus, Sim},
+        track::{Track, SAMPLE_CIRCUIT},
+    };
+
+    #[test]
+    fn brake_lights_follow_each_cars_echo_not_handbrake_or_motion() {
+        let mut app = App::new();
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let mut shell = ShellSimulation::new(track.clone());
+        shell.sim = Sim::new(track, 4);
+        app.insert_resource(shell)
+            .add_systems(Update, render_brake_lights);
+        let lights: Vec<_> = (0..4)
+            .map(|car| {
+                app.world_mut()
+                    .spawn((BrakeLight(car), Visibility::Hidden))
+                    .id()
+            })
+            .collect();
+        for braking_car in 0..4 {
+            let mut inputs = [CarInput {
+                handbrake: true,
+                ..default()
+            }; 4];
+            inputs[braking_car].brake = 0.01;
+            let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+            shell.curr_snapshots = shell.sim.tick(&inputs);
+            app.update();
+            for (car, &light) in lights.iter().enumerate() {
+                assert_eq!(
+                    *app.world().get::<Visibility>(light).unwrap(),
+                    if car == braking_car {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    }
+                );
+            }
+        }
+        let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+        shell.curr_snapshots = shell.sim.tick(&[CarInput::default(); 4]);
+        app.update();
+        for light in lights {
+            assert_eq!(
+                *app.world().get::<Visibility>(light).unwrap(),
+                Visibility::Hidden
+            );
+        }
+    }
+
+    #[test]
+    fn smoke_disappears_on_release_without_waiting_for_emission_cadence() {
+        let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 4);
+        let mut effects = DrivingEffects {
+            generation: 0,
+            decals: SkidDecals::new(0),
+            particles: VecDeque::new(),
+            tick: 0,
+        };
+        let mut inputs = [CarInput {
+            brake: 1.0,
+            ..default()
+        }; 4];
+        for _ in 0..4 {
+            step_particles(&sim.tick(&inputs), &mut effects);
+        }
+        assert!(effects.particles.is_empty(), "braking alone must not smoke");
+        for input in &mut inputs {
+            input.handbrake = true;
+        }
+        for _ in 0..4 {
+            step_particles(&sim.tick(&inputs), &mut effects);
+        }
+        for car in 0..4 {
+            assert_eq!(
+                effects
+                    .particles
+                    .iter()
+                    .filter(|p| matches!(p.kind, ParticleKind::Smoke(i) if i == car))
+                    .count(),
+                2
+            );
+        }
+        inputs[0].handbrake = false;
+        inputs[2].handbrake = false;
+        step_particles(&sim.tick(&inputs), &mut effects);
+        assert!(effects
+            .particles
+            .iter()
+            .all(|p| matches!(p.kind, ParticleKind::Smoke(1 | 3))));
+        assert_eq!(effects.particles.len(), 4, "other Cars keep their smoke");
+        let mut snapshots = sim.tick(&inputs);
+        snapshots[1].finish_status = FinishStatus::Finished { place: 1 };
+        snapshots.truncate(2);
+        step_particles(&snapshots, &mut effects);
+        assert!(
+            effects.particles.is_empty(),
+            "finished and removed Cars leave no smoke"
+        );
     }
 }
