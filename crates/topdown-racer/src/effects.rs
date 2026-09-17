@@ -80,6 +80,7 @@ pub const SKID_BUDGET: usize = 2048;
 #[derive(Resource)]
 struct DrivingEffects {
     generation: u64,
+    race_generation: u64,
     decals: SkidDecals,
     particles: VecDeque<Particle>,
     tick: u32,
@@ -94,6 +95,7 @@ impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(DrivingEffects {
             generation: 0,
+            race_generation: 0,
             decals: SkidDecals::new(SKID_BUDGET),
             particles: VecDeque::new(),
             tick: 0,
@@ -136,8 +138,14 @@ fn reset_effects(mut effects: ResMut<DrivingEffects>) {
 }
 
 fn advance_effects(shell: Res<ShellSimulation>, mut effects: ResMut<DrivingEffects>) {
-    if effects.generation != shell.generation {
+    if effects.race_generation != shell.race_generation {
         effects.decals.clear();
+        effects.particles.clear();
+        effects.tick = 0;
+        effects.race_generation = shell.race_generation;
+    }
+    if effects.generation != shell.generation {
+        effects.decals.previous.clear();
         effects.particles.clear();
         effects.tick = 0;
         effects.generation = shell.generation;
@@ -340,5 +348,149 @@ fn render_brake_lights(
         } else {
             Visibility::Hidden
         };
+    }
+}
+
+#[cfg(test)]
+mod skid_lifecycle_tests {
+    use super::*;
+    use topdown_racer_core::{simulation::Sim, track::Track};
+
+    #[test]
+    fn recovery_preserves_marks_but_restart_clears_them() {
+        let track = Track::parse(topdown_racer_core::track::HILLSIDE_CIRCUIT).unwrap();
+        let mut app = App::new();
+        app.insert_resource(ShellSimulation::from_sim(Sim::new(track, 1)))
+            .insert_resource(DrivingEffects {
+                generation: 0,
+                decals: SkidDecals::new(SKID_BUDGET),
+                race_generation: 0,
+                particles: VecDeque::new(),
+                tick: 0,
+            })
+            .add_systems(Update, advance_effects);
+        app.update();
+        {
+            let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+            shell.curr_snapshots[0].pose.x += 1.0;
+            shell.curr_snapshots[0].drifting = true;
+        }
+        app.update();
+        let marks: Vec<_> = app
+            .world()
+            .resource::<DrivingEffects>()
+            .decals
+            .marks()
+            .copied()
+            .collect();
+        assert_eq!(marks.len(), 2);
+        {
+            let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+            shell.sim.pause();
+            shell.sim.recover_player().unwrap();
+            shell.curr_snapshots = shell.sim.snapshots();
+            shell.prev_snapshots = shell.curr_snapshots.clone();
+            shell.generation += 1;
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<DrivingEffects>()
+                .decals
+                .marks()
+                .copied()
+                .collect::<Vec<_>>(),
+            marks
+        );
+        app.world_mut()
+            .resource_mut::<ShellSimulation>()
+            .reset_to_fresh_race();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<DrivingEffects>()
+                .decals
+                .marks()
+                .count(),
+            0
+        );
+    }
+
+    /// Pins the shell render half of the seam: after a drift step, decal
+    /// slots 0..marks must be Visible at world_z::SKID and the rest Hidden.
+    #[test]
+    fn render_decals_shows_marks_at_skid_z_and_hides_the_rest() {
+        let mut app = App::new();
+        app.insert_resource(ShellSimulation::from_sim(Sim::new(
+            Track::parse(topdown_racer_core::track::HILLSIDE_CIRCUIT).unwrap(),
+            1,
+        )))
+        .insert_resource(DrivingEffects {
+            generation: 0,
+            race_generation: 0,
+            decals: SkidDecals::new(SKID_BUDGET),
+            particles: VecDeque::new(),
+            tick: 0,
+        })
+        .add_systems(Update, (advance_effects, render_decals).chain());
+        for slot in 0..8u32 {
+            app.world_mut().spawn((
+                DecalSlot(slot as usize),
+                SpriteBundle {
+                    visibility: Visibility::Hidden,
+                    ..default()
+                },
+            ));
+        }
+        app.update();
+        {
+            let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+            shell.curr_snapshots[0].pose.x += 1.0;
+            shell.curr_snapshots[0].drifting = true;
+        }
+        app.update();
+        let mark_count = app
+            .world()
+            .resource::<DrivingEffects>()
+            .decals
+            .marks()
+            .count();
+        assert_eq!(mark_count, 2);
+        let marks: Vec<_> = app
+            .world()
+            .resource::<DrivingEffects>()
+            .decals
+            .marks()
+            .copied()
+            .collect();
+        let mut shown = 0;
+        for (slot, sprite, transform, visibility) in app
+            .world_mut()
+            .query::<(&DecalSlot, &Sprite, &Transform, &Visibility)>()
+            .iter(app.world())
+        {
+            match marks.get(slot.0) {
+                Some(mark) => {
+                    assert_eq!(
+                        *visibility,
+                        Visibility::Visible,
+                        "slot {} must show",
+                        slot.0
+                    );
+                    assert_eq!(transform.translation, mark.center.extend(world_z::SKID));
+                    let (_, angle) = transform.rotation.to_axis_angle();
+                    assert!((angle - mark.heading).abs() < 1e-5);
+                    assert_eq!(
+                        sprite.custom_size,
+                        Some(Vec2::new(mark.length + 0.125, 0.25))
+                    );
+                    shown += 1;
+                }
+                None => {
+                    assert_eq!(*visibility, Visibility::Hidden, "slot {} must hide", slot.0);
+                }
+            }
+        }
+        assert_eq!(shown, marks.len());
     }
 }

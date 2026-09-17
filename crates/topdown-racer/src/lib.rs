@@ -108,7 +108,10 @@ pub struct ShellSimulation {
     pub practice: Option<topdown_racer_core::practice::PracticeAttempt>,
     pub practice_baseline: Option<f32>,
     pub camera_mode: awareness::CameraMode,
+    /// Pose discontinuities, including Recovery and a fresh Race.
     pub generation: u64,
+    /// Fresh Race identity; Recovery must not erase persistent world marks.
+    pub race_generation: u64,
     pub steering_response: controls::SteeringResponse,
     pub selected_pace: topdown_racer_core::ai::OpponentPace,
     pub sim: Sim,
@@ -130,6 +133,7 @@ impl ShellSimulation {
             practice_baseline: None,
             camera_mode: Default::default(),
             generation: 0,
+            race_generation: 0,
             steering_response: Default::default(),
             selected_pace: sim.opponent_pace(),
             sim,
@@ -146,6 +150,7 @@ impl ShellSimulation {
         let response = self.steering_response;
         let camera_mode = self.camera_mode;
         let generation = self.generation + 1;
+        let race_generation = self.race_generation + 1;
         let practice_selected = self.practice_selected;
         let race_mode_before_practice = self.race_mode_before_practice;
         *self = Self::from_sim(Sim::new_race_with_pace(
@@ -157,6 +162,7 @@ impl ShellSimulation {
         self.steering_response = response;
         self.camera_mode = camera_mode;
         self.generation = generation;
+        self.race_generation = race_generation;
         self.practice_selected = practice_selected;
         self.race_mode_before_practice = race_mode_before_practice;
         if practice_selected {
