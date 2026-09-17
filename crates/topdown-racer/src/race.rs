@@ -486,4 +486,28 @@ mod tests {
         assert!(!shell.sim.is_paused());
         assert_eq!(shell.sim.preparation_ticks(), 64);
     }
+    #[test]
+    fn pause_restart_keeps_the_stored_practice_target() {
+        let mut app =
+            lifecycle_app(Track::parse(topdown_racer_core::track::HILLSIDE_CIRCUIT).unwrap());
+        settle(&mut app);
+        let key = crate::practice::record_key(app.world().resource::<ShellSimulation>());
+        let mut records = crate::records::LocalRecords::default();
+        records.book.consider(&key, 12.5, true);
+        app.insert_resource(records);
+        press(&mut app, KeyCode::KeyP);
+        settle(&mut app);
+        assert_eq!(
+            app.world().resource::<ShellSimulation>().practice_baseline,
+            Some(12.5)
+        );
+        press(&mut app, KeyCode::Escape);
+        settle(&mut app);
+        press(&mut app, KeyCode::KeyR);
+        settle(&mut app);
+        let shell = app.world().resource::<ShellSimulation>();
+        assert!(shell.practice.is_some());
+        assert_eq!(shell.curr_snapshots.len(), 1);
+        assert_eq!(shell.practice_baseline, Some(12.5));
+    }
 }

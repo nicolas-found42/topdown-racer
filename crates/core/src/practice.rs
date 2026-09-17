@@ -32,16 +32,14 @@ impl CornerChallenge {
             }
             arc += length;
         }
+        let pose = track.point_at_arc(25.0);
+        let direction = track.centerline_frame(pose).direction;
         Self {
             gates,
-            initial: {
-                let pose = track.point_at_arc(25.0);
-                let direction = track.centerline_frame(pose).direction;
-                GridCar {
-                    pose,
-                    heading: direction.y.atan2(direction.x),
-                    velocity: direction * 22.0,
-                }
+            initial: GridCar {
+                pose,
+                heading: direction.y.atan2(direction.x),
+                velocity: direction * 22.0,
             },
         }
     }

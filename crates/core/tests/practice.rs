@@ -71,3 +71,14 @@ fn practice_times_only_the_section_and_freezes_at_exit() {
         }
     );
 }
+
+#[test]
+fn practice_start_rotates_with_the_authored_track() {
+    let mut track = Track::parse(HILLSIDE_CIRCUIT).unwrap();
+    for point in &mut track.points {
+        *point = Vec2::new(-point.y, point.x);
+    }
+    let challenge = CornerChallenge::hillside(&track);
+    assert!((challenge.initial.velocity - Vec2::Y * 22.0).length() < 0.001);
+    assert!((challenge.initial.heading - std::f32::consts::FRAC_PI_2).abs() < 0.001);
+}

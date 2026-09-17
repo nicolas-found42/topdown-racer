@@ -44,6 +44,10 @@ fn grass_canvas_covers_the_fixed_camera_view_at_outer_track_bounds() {
     assert!(canvas
         .sample_world(glam::Vec2::new(-62.0625, 30.0))
         .is_some());
+    // Vertical half-view (22.5) + lead (10) + wall (12) + snapping slack.
+    for y in [-44.5625, 104.5625] {
+        assert!(canvas.sample_world(glam::Vec2::new(50.0, y)).is_some());
+    }
 }
 
 /// Issue #42: the baked canvas the shell uploads must render every world
