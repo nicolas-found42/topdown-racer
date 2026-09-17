@@ -619,9 +619,12 @@ impl Sim {
             .sum();
         let pose = self.track.point_at_arc(arc - 5.0);
         let direction = self.track.centerline_frame(pose).direction;
-        if self.cars.iter().skip(1).any(|rival| {
-            rival.finish_status == FinishStatus::Racing && rival.pose.distance(pose) < 6.0
-        }) {
+        if self
+            .cars
+            .iter()
+            .skip(1)
+            .any(|rival| rival.pose.distance(pose) < 6.0)
+        {
             return Err(RecoveryError::Occupied);
         }
         let car = &mut self.cars[0];
@@ -2665,6 +2668,80 @@ mod tests {
             overlapped,
             "the fixture must actually coast the finished car through the rival"
         );
+    }
+
+    #[test]
+    fn recovery_respects_finished_car_clearance() {
+        let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 2);
+        sim.cars[0].pose = Vec2::new(50.0, 40.0);
+        sim.cars[1].pose = sim.track.spawn_pose(5.0);
+        sim.cars[1].finish_status = FinishStatus::Finished { place: 1 };
+        let before = sim.snapshots();
+        assert_eq!(sim.recover_player(), Err(RecoveryError::Occupied));
+        assert_eq!(sim.snapshots(), before);
+    }
+
+    #[test]
+    fn recovery_before_and_after_the_seam_cannot_credit_progress() {
+        let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 1);
+        walk_ordered_checkpoints(&mut sim);
+        sim.cars[0].velocity = Vec2::ZERO;
+        let next = sim.cars[0].next_checkpoint;
+        sim.recover_player().unwrap();
+        assert_eq!(sim.cars[0].next_checkpoint, next);
+        assert_eq!(sim.cars[0].completed_laps, 0);
+        assert_eq!(sim.cars[0].last_cleared_checkpoint, 6);
+        assert_eq!(
+            sim.cars[0].pose,
+            sim.track.point_at_arc(
+                sim.track.total_length() - sim.track.points[6].distance(sim.track.points[7]) - 5.0
+            )
+        );
+        // Finish the invalidated lap, then recover just after the seam.
+        cross_checkpoint(&mut sim, Vec2::ZERO, Vec2::new(2000.0, 0.0));
+        sim.cars[0].last_recovery_tick = None;
+        sim.cars[0].velocity = Vec2::ZERO;
+        sim.recover_player().unwrap();
+        assert_eq!(sim.cars[0].completed_laps, 1);
+        assert_eq!(sim.cars[0].last_cleared_checkpoint, 0);
+        assert_eq!(sim.cars[0].next_checkpoint, 1);
+        assert_eq!(sim.cars[0].pose, sim.track.spawn_pose(5.0));
+        // Crossing the checker again cannot increment a lap without the route.
+        let snap = cross_checkpoint(&mut sim, Vec2::ZERO, Vec2::new(2000.0, 0.0));
+        assert_eq!(snap.completed_laps, 1);
+        assert!(snap.current_lap_invalidated);
+    }
+
+    #[test]
+    fn finish_window_and_finished_cars_stay_frozen_through_resume() {
+        let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 2);
+        for _ in 0..TOTAL_LAPS {
+            walk_ordered_checkpoints(&mut sim);
+            cross_checkpoint(&mut sim, Vec2::ZERO, Vec2::new(2000.0, 0.0));
+        }
+        assert_eq!(sim.phase(), RacePhase::Racing);
+        assert_eq!(sim.recover_player(), Err(RecoveryError::Unavailable));
+        let winner_tick = sim.winner_tick.unwrap();
+        let frozen = sim.snapshots();
+        let racing_ticks = sim.racing_ticks();
+        sim.pause();
+        for _ in 0..4000 {
+            assert_eq!(sim.tick(&[]), frozen);
+            assert_eq!(sim.racing_ticks(), racing_ticks);
+            assert_eq!(sim.phase(), RacePhase::Racing);
+        }
+        sim.resume();
+        for _ in 0..64 {
+            assert_eq!(sim.tick(&[]), frozen);
+        }
+        assert_eq!(sim.winner_tick, Some(winner_tick));
+        for _ in 0..45 * 64 - 1 {
+            sim.tick(&[]);
+            assert_eq!(sim.phase(), RacePhase::Racing);
+        }
+        sim.tick(&[]);
+        assert_eq!(sim.phase(), RacePhase::Finished);
+        assert_eq!(sim.snapshots()[1].finish_status, FinishStatus::Dnf);
     }
 
     #[test]

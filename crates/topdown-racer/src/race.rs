@@ -542,6 +542,11 @@ mod tests {
         let mut app = lifecycle_app(Track::parse(SAMPLE_CIRCUIT).unwrap());
         press(&mut app, KeyCode::Enter);
         settle(&mut app);
+        press(&mut app, KeyCode::KeyW);
+        app.world_mut()
+            .resource_mut::<crate::PlayerInput>()
+            .0
+            .throttle = 1.0;
         app.world_mut().send_event(bevy::window::WindowFocused {
             window: Entity::PLACEHOLDER,
             focused: false,
@@ -554,6 +559,12 @@ mod tests {
         });
         app.update();
         assert!(app.world().resource::<ShellSimulation>().sim.is_paused());
+        assert_eq!(app.world().resource::<crate::PlayerInput>().0.throttle, 0.0);
+        assert!(!app
+            .world()
+            .resource::<ButtonInput<KeyCode>>()
+            .pressed(KeyCode::KeyW));
+        assert!(app.world().resource::<crate::ControlGate>().0);
         press(&mut app, KeyCode::Enter);
         app.update();
         let shell = app.world().resource::<ShellSimulation>();

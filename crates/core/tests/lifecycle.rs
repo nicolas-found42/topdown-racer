@@ -193,3 +193,79 @@ fn pause_recovery_is_available_but_frozen_time_cannot_bypass_cooldown() {
     }
     assert_eq!(sim.recover_player(), Err(RecoveryError::Cooldown));
 }
+
+#[test]
+fn countdown_pause_and_preparation_do_not_consume_race_ticks() {
+    let mut sim = Sim::new_race(Track::parse(HILLSIDE_CIRCUIT).unwrap(), 4);
+    for _ in 0..80 {
+        sim.tick(&[]);
+    }
+    sim.pause();
+    let frozen = sim.snapshots();
+    for _ in 0..1000 {
+        assert_eq!(sim.tick(&[]), frozen);
+    }
+    sim.resume();
+    for _ in 0..64 {
+        assert_eq!(sim.tick(&[]), frozen);
+    }
+    assert_eq!(sim.racing_ticks(), 0);
+    sim.tick(&[]);
+    assert_ne!(sim.snapshots()[0].phase, frozen[0].phase);
+    assert_eq!(sim.racing_ticks(), 0);
+}
+
+#[test]
+fn recovered_lap_is_invalid_but_next_full_manual_lap_is_eligible() {
+    use topdown_racer_core::ai::{AiDriver, AiView};
+    let track = Track::parse(HILLSIDE_CIRCUIT).unwrap();
+    let mut sim = Sim::new(track.clone(), 1);
+    sim.recover_player().unwrap();
+    let mut driver = AiDriver::new(0);
+    for _ in 0..10000 {
+        let previous = sim.snapshots()[0];
+        let field = [(previous.pose, previous.velocity)];
+        let input = driver.compute_input(AiView {
+            active: None,
+            car_index: 0,
+            pose: previous.pose,
+            heading: previous.heading,
+            velocity: previous.velocity,
+            track: &track,
+            field: &field,
+        });
+        let current = sim.tick(&[input])[0];
+        if current.completed_laps == 1 {
+            assert!(current.lap_invalidated[0]);
+            assert_eq!(current.best_manual_lap_time, None);
+            assert!(!current.current_lap_invalidated);
+        }
+        if current.completed_laps == 2 {
+            assert!(!current.lap_invalidated[1]);
+            assert!(!current.lap_assisted[1]);
+            assert_eq!(current.best_manual_lap_time, current.lap_times[1]);
+            return;
+        }
+    }
+    panic!("manual input sequence never completed two laps");
+}
+
+#[test]
+fn high_speed_recovery_is_rejected_without_mutating_the_car() {
+    use glam::Vec2;
+    use topdown_racer_core::simulation::{GridCar, RecoveryError};
+    let track = Track::parse(HILLSIDE_CIRCUIT).unwrap();
+    for speed in [1.0, 25.0] {
+        let mut sim = Sim::from_grid(
+            track.clone(),
+            &[GridCar {
+                pose: Vec2::new(50.0, 0.0),
+                heading: 0.0,
+                velocity: Vec2::new(speed, 0.0),
+            }],
+        );
+        let before = sim.snapshots();
+        assert_eq!(sim.recover_player(), Err(RecoveryError::TooFast));
+        assert_eq!(sim.snapshots(), before);
+    }
+}
