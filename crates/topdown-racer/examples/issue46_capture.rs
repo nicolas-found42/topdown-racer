@@ -20,10 +20,11 @@ fn input(mut script: ResMut<Script>, shell: Res<ShellSimulation>, mut input: Res
             throttle: 1.0,
             ..default()
         }
-    } else if script.ticks < 152 {
+    } else if script.ticks < 156 {
+        CarInput::default()
+    } else if script.ticks < 176 {
         CarInput {
             brake: 1.0,
-            handbrake: true,
             ..default()
         }
     } else {
@@ -33,6 +34,7 @@ fn input(mut script: ResMut<Script>, shell: Res<ShellSimulation>, mut input: Res
         120 => Some("01-before"),
         140 => Some("02-brake-smoke"),
         156 => Some("03-released"),
+        172 => Some("04-brake-lights"),
         _ => script.pending,
     };
 }
