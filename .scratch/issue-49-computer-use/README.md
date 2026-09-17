@@ -45,6 +45,7 @@ hold, followed by release and two seconds without input, produced:
 | `21-manual-after-toggle.png` | T back from Autopilot: `MANUAL | LAP ASSISTED`, `SPEED 8 u/s` |
 | `22-paused-label.png` | Pause retains `MANUAL | LAP ASSISTED` |
 | `23-after-resume-label.png` | Resume preparation (`READY`) retains `MANUAL | LAP ASSISTED` |
+| `31-car-sprite-verified.png` | Proper `BEVY_ASSET_ROOT` asset root / Cargo example execution: Hero GT Car Sprite and rivals render crisply with liveries and turned wheels |
 
 Held-input latching and release/coasting are additionally asserted through the
 real shell keyboard mapping and simulation systems in
@@ -52,10 +53,9 @@ real shell keyboard mapping and simulation systems in
 after returning from pause and a paused T press followed by resume are covered
 by dedicated lifecycle regressions. All 198 workspace tests pass.
 
-Limitations: the native run displayed the Track, HUD and minimap but not the Car
-sprites, so steering direction cannot be visually certified from these captures.
-The no-input follow-up capture briefly reported 2 u/s (cause not established);
-it does not prove exact stationarity. Historical capture 03 and the deterministic
-neutral-input test provide that evidence. The historical minimum-window result
-capture remains the 640x360 evidence; follow-up captures use 1280x720. Discarded
-follow-up shots captured a terminal or a paused game and are not driving proof.
+Launch note on car sprites: earlier captures 28–30 ran the binary directly
+without `BEVY_ASSET_ROOT`, causing Bevy to fall back to the binary directory
+where disk textures did not resolve. Running via `cargo run --example issue49_capture`
+(or setting `BEVY_ASSET_ROOT=crates/topdown-racer`) resolves textures, and
+`31-car-sprite-verified.png` confirms car sprites, numbers, and livery colors render
+crisply on the grid.
