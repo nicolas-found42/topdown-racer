@@ -77,7 +77,7 @@ pub fn spawn_menu_ui(
             ))
             .with_children(|button| {
                 button.spawn(TextBundle::from_section(
-                    "CORNER PRACTICE (P): same entry, timed section + exit speed",
+                    "CORNER PRACTICE (P): Hillside braking + right-left sequence\nSame rolling entry | timed cyan-to-white gates + exit speed | R: retry",
                     TextStyle {
                         font_size: 18.0,
                         color: Color::WHITE,

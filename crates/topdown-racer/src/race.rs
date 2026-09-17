@@ -78,9 +78,11 @@ pub fn reset_race_on_enter(
     records: Option<Res<crate::records::LocalRecords>>,
 ) {
     shell.reset_to_fresh_race();
-    shell.practice_baseline = records
-        .as_ref()
-        .and_then(|records| records.book.best(&crate::practice::record_key(&shell)));
+    shell.practice_baseline = records.as_ref().and_then(|records| {
+        records
+            .book
+            .practice_best(&crate::practice::record_key(&shell))
+    });
     gate.0 = true;
     input.0 = Default::default();
     steering.reset();
@@ -578,13 +580,17 @@ mod tests {
         settle(&mut app);
         let key = crate::practice::record_key(app.world().resource::<ShellSimulation>());
         let mut records = crate::records::LocalRecords::default();
-        records.book.consider(&key, 12.5, true);
+        let best = crate::records::PracticeRecord {
+            seconds: 12.5,
+            exit_speed: 24.0,
+        };
+        records.book.consider_practice(&key, best, true);
         app.insert_resource(records);
         press(&mut app, KeyCode::KeyP);
         settle(&mut app);
         assert_eq!(
             app.world().resource::<ShellSimulation>().practice_baseline,
-            Some(12.5)
+            Some(best)
         );
         press(&mut app, KeyCode::Escape);
         settle(&mut app);
@@ -593,6 +599,6 @@ mod tests {
         let shell = app.world().resource::<ShellSimulation>();
         assert!(shell.practice.is_some());
         assert_eq!(shell.curr_snapshots.len(), 1);
-        assert_eq!(shell.practice_baseline, Some(12.5));
+        assert_eq!(shell.practice_baseline, Some(best));
     }
 }
