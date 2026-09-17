@@ -109,7 +109,7 @@ pub struct ShellSimulation {
     pub practice_selected: bool,
     pub race_mode_before_practice: topdown_racer_core::simulation::DrivingMode,
     pub practice: Option<topdown_racer_core::practice::PracticeAttempt>,
-    pub practice_baseline: Option<f32>,
+    pub practice_baseline: Option<records::PracticeRecord>,
     pub camera_mode: awareness::CameraMode,
     /// Pose discontinuities, including Recovery and a fresh Race.
     pub generation: u64,

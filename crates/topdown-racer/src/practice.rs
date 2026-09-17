@@ -50,7 +50,13 @@ pub(crate) fn spawn_results(commands: &mut Commands, shell: &ShellSimulation, no
             exit_speed,
             shell
                 .practice_baseline
-                .map(|best| format!("{:+.3}s against previous best ({best:.3}s)", seconds - best))
+                .map(|best| format!(
+                    "{:+.3}s | EXIT {:+.1} u/s against best\nBest: {:.3}s | EXIT {:.1} u/s",
+                    seconds - best.seconds,
+                    exit_speed - best.exit_speed,
+                    best.seconds,
+                    best.exit_speed
+                ))
                 .unwrap_or_else(|| "First eligible attempt".into())
         ),
         PracticeStatus::Invalid(reason) => format!("ATTEMPT INELIGIBLE: {reason}"),

@@ -216,7 +216,10 @@ pub(crate) fn update_hud(
         hud.lap = "CORNER PRACTICE".into();
         hud.position = "One Car | cyan entry, white exit".into();
         hud.current_lap_time = format!("SECTION {:.3}s", attempt.elapsed());
-        hud.best_lap_time = format!("TARGET {}", format_opt_lap_time(shell.practice_baseline));
+        hud.best_lap_time = format!(
+            "TARGET {}",
+            format_opt_lap_time(shell.practice_baseline.map(|best| best.seconds))
+        );
     }
 
     for (element, mut text) in hud_query.iter_mut() {

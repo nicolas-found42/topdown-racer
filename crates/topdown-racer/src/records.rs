@@ -4,9 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Write, path::Path};
 use topdown_racer_core::track::Track;
 
+/// Measurements belonging to the fastest eligible traversal of one challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PracticeRecord {
+    pub seconds: f32,
+    pub exit_speed: f32,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct RecordBook {
     entries: BTreeMap<String, f32>,
+    #[serde(default)]
+    practice_entries: BTreeMap<String, PracticeRecord>,
 }
 
 impl RecordBook {
@@ -33,6 +42,31 @@ impl RecordBook {
         self.entries.insert(key.to_owned(), seconds);
         true
     }
+    pub fn practice_best(&self, key: &str) -> Option<PracticeRecord> {
+        self.practice_entries.get(key).copied().filter(|record| {
+            record.seconds.is_finite()
+                && record.seconds > 0.0
+                && record.exit_speed.is_finite()
+                && record.exit_speed >= 0.0
+        })
+    }
+
+    pub fn consider_practice(&mut self, key: &str, record: PracticeRecord, eligible: bool) -> bool {
+        if !eligible
+            || !record.seconds.is_finite()
+            || record.seconds <= 0.0
+            || !record.exit_speed.is_finite()
+            || record.exit_speed < 0.0
+            || self
+                .practice_best(key)
+                .is_some_and(|best| best.seconds <= record.seconds)
+        {
+            return false;
+        }
+        self.practice_entries.insert(key.to_owned(), record);
+        true
+    }
+
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
@@ -104,11 +138,20 @@ pub(crate) fn persist_completed_laps(
     mut saved: ResMut<crate::SavedBestLap>,
 ) {
     if let Some(attempt) = &shell.practice {
-        if let topdown_racer_core::practice::PracticeStatus::Finished { seconds, .. } =
-            attempt.status()
+        if let topdown_racer_core::practice::PracticeStatus::Finished {
+            seconds,
+            exit_speed,
+        } = attempt.status()
         {
             let key = crate::practice::record_key(&shell);
-            if records.book.consider(&key, seconds, true) {
+            if records.book.consider_practice(
+                &key,
+                PracticeRecord {
+                    seconds,
+                    exit_speed,
+                },
+                true,
+            ) {
                 records.notice = match records.book.save(&records.path) {
                     Ok(()) => String::new(),
                     Err(_) => "Practice record kept for this session; local save failed".into(),

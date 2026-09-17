@@ -89,9 +89,11 @@ fn pause_actions(
         }
         Action::Restart => {
             shell.reset_to_fresh_race();
-            shell.practice_baseline = records
-                .as_ref()
-                .and_then(|records| records.book.best(&crate::practice::record_key(&shell)));
+            shell.practice_baseline = records.as_ref().and_then(|records| {
+                records
+                    .book
+                    .practice_best(&crate::practice::record_key(&shell))
+            });
             notice.0.clear();
         }
         Action::Menu => next.set(AppState::Menu),
