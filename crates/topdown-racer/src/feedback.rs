@@ -7,6 +7,8 @@ pub struct FeedbackFrame {
     pub tire_volume: f32,
     pub surface_volume: f32,
     pub impact_volume: f32,
+    /// True only on an armed contact onset; drives a single playback.
+    pub impact_started: bool,
 }
 pub struct FeedbackMixer {
     contact: bool,
@@ -33,7 +35,8 @@ impl FeedbackMixer {
         if !contact {
             self.quiet_ticks = self.quiet_ticks.saturating_add(1);
         }
-        if contact && !self.contact && (self.quiet_ticks >= 8 || self.previous_speed == 0.0) {
+        let impact_started = contact && !self.contact && self.quiet_ticks >= 8;
+        if impact_started {
             let severity = car
                 .car_contact_speed
                 .max((self.previous_speed - speed).abs());
@@ -61,6 +64,7 @@ impl FeedbackMixer {
                 (speed / 40.0).min(0.4)
             },
             impact_volume: self.envelope,
+            impact_started,
         };
         self.envelope = (self.envelope - 0.06).max(0.0);
         result
@@ -71,6 +75,7 @@ pub struct FeedbackState {
     mixer: FeedbackMixer,
     pub frame: FeedbackFrame,
     generation: u64,
+    pending_impact: Option<f32>,
 }
 #[derive(Resource)]
 pub struct EffectsVolume(pub f32);
@@ -93,7 +98,12 @@ impl EffectsVolume {
 #[derive(Component)]
 struct SurfaceAudio;
 #[derive(Component)]
-struct ImpactAudio;
+struct ImpactAudio {
+    gain: f32,
+}
+/// Small nose-local highlight, above the Car but never across the road.
+#[derive(Component)]
+pub(crate) struct ImpactFlash;
 pub(crate) struct FeedbackPlugin;
 impl Plugin for FeedbackPlugin {
     fn build(&self, app: &mut App) {
@@ -134,9 +144,9 @@ fn setup(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
     commands.spawn((
         AudioBundle {
             source: impact,
-            settings: PlaybackSettings::LOOP.with_volume(bevy::audio::Volume::ZERO),
+            settings: PlaybackSettings::ONCE.with_volume(bevy::audio::Volume::ZERO),
         },
-        ImpactAudio,
+        ImpactAudio { gain: 0.0 },
     ));
 }
 fn advance(shell: Res<crate::ShellSimulation>, mut feedback: ResMut<FeedbackState>) {
@@ -147,10 +157,16 @@ fn advance(shell: Res<crate::ShellSimulation>, mut feedback: ResMut<FeedbackStat
         };
     }
     if shell.sim.is_paused() || shell.sim.preparation_ticks() > 0 {
+        feedback.pending_impact = None;
+        feedback.mixer.envelope = 0.0;
+        feedback.frame.impact_volume = 0.0;
         return;
     }
     if let Some(car) = shell.curr_snapshots.first() {
         feedback.frame = feedback.mixer.step(car);
+        if feedback.frame.impact_started {
+            feedback.pending_impact = Some(feedback.frame.impact_volume);
+        }
     }
 }
 fn volume_control(keys: Res<ButtonInput<KeyCode>>, mut volume: ResMut<EffectsVolume>) {
@@ -165,14 +181,20 @@ fn volume_control(keys: Res<ButtonInput<KeyCode>>, mut volume: ResMut<EffectsVol
     }
 }
 fn apply(
-    shell: Res<crate::ShellSimulation>,
-    state: Res<State<crate::AppState>>,
-    feedback: Res<FeedbackState>,
+    mut commands: Commands,
+    lifecycle: (Res<crate::ShellSimulation>, Res<State<crate::AppState>>),
+    mut feedback: ResMut<FeedbackState>,
     volume: Res<EffectsVolume>,
     surface: Query<&AudioSink, With<SurfaceAudio>>,
-    impact: Query<&AudioSink, With<ImpactAudio>>,
-    mut cars: Query<(&crate::CarSprite, &mut Sprite)>,
+    mut impact: Query<(
+        Entity,
+        Option<&AudioSink>,
+        &mut PlaybackSettings,
+        &mut ImpactAudio,
+    )>,
+    mut flashes: Query<&mut Visibility, With<ImpactFlash>>,
 ) {
+    let (shell, state) = lifecycle;
     let active = *state.get() == crate::AppState::Race
         && !shell.sim.is_paused()
         && shell.sim.preparation_ticks() == 0;
@@ -180,14 +202,105 @@ fn apply(
     for sink in &surface {
         sink.set_volume(feedback.frame.surface_volume * level);
     }
-    for sink in &impact {
-        sink.set_volume(feedback.frame.impact_volume * level);
+    let onset = feedback.pending_impact.take().filter(|_| active);
+    for (entity, sink, mut settings, mut voice) in &mut impact {
+        if !active {
+            voice.gain = 0.0;
+            if let Some(sink) = sink {
+                sink.stop();
+            }
+        } else if let Some(gain) = onset {
+            voice.gain = gain;
+            settings.volume = bevy::audio::Volume::new(gain * level);
+            if let Some(sink) = sink {
+                sink.stop();
+                commands.entity(entity).remove::<AudioSink>();
+            }
+        } else if let Some(sink) = sink {
+            sink.set_volume(voice.gain * level);
+        }
     }
-    for (car, mut sprite) in &mut cars {
-        sprite.color = if car.car_index == 0 && feedback.frame.impact_volume > 0.0 && active {
-            crate::palette::color(crate::palette::RIVAL_ORANGE)
+    for mut visibility in &mut flashes {
+        *visibility = if feedback.frame.impact_volume > 0.0 && active {
+            Visibility::Inherited
         } else {
-            Color::WHITE
+            Visibility::Hidden
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AppState, ShellSimulation};
+    use topdown_racer_core::track::{Track, HILLSIDE_CIRCUIT};
+
+    #[test]
+    fn impact_is_car_local_consumed_once_and_cleared_on_pause_and_restart() {
+        let mut app = App::new();
+        app.insert_resource(ShellSimulation::new(
+            Track::parse(HILLSIDE_CIRCUIT).unwrap(),
+        ))
+        .insert_resource(State::new(AppState::Race))
+        .init_resource::<Assets<AudioSource>>()
+        .init_resource::<FeedbackState>()
+        .init_resource::<EffectsVolume>()
+        .add_systems(Startup, (setup, crate::audio::setup_audio))
+        .add_systems(Update, (advance, apply).chain());
+        let flash = app
+            .world_mut()
+            .spawn((ImpactFlash, Visibility::Hidden))
+            .id();
+        app.update();
+        let baseline = app.world().entities().len();
+        for _ in 0..10 {
+            {
+                let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
+                shell.curr_snapshots[0].wall_contact = true;
+                shell.curr_snapshots[0].velocity = Vec2::new(20.0, 0.0);
+            }
+            app.update();
+            assert_eq!(
+                *app.world().get::<Visibility>(flash).unwrap(),
+                Visibility::Inherited
+            );
+            assert!(app
+                .world()
+                .resource::<FeedbackState>()
+                .pending_impact
+                .is_none());
+            for _ in 0..20 {
+                app.update();
+            }
+            assert_eq!(
+                *app.world().get::<Visibility>(flash).unwrap(),
+                Visibility::Hidden
+            );
+            app.world_mut()
+                .resource_mut::<ShellSimulation>()
+                .sim
+                .pause();
+            app.update();
+            assert_eq!(
+                *app.world().get::<Visibility>(flash).unwrap(),
+                Visibility::Hidden
+            );
+            app.world_mut()
+                .resource_mut::<ShellSimulation>()
+                .reset_to_fresh_race();
+            app.update();
+            assert_eq!(
+                app.world().resource::<FeedbackState>().frame.impact_volume,
+                0.0
+            );
+            assert_eq!(app.world().entities().len(), baseline);
+            assert_eq!(
+                app.world_mut()
+                    .query::<&Handle<AudioSource>>()
+                    .iter(app.world())
+                    .count(),
+                4
+            );
+        }
     }
 }
