@@ -183,6 +183,18 @@ impl AiDriver {
         }
     }
 
+    /// Clear transient driving memory while retaining pace, personality and diagnostics.
+    pub(crate) fn reset_after_recovery(&mut self) {
+        self.line_offset = 0.0;
+        if self.pass_target.take().is_some() {
+            self.pass_stats.aborted += 1;
+        }
+        self.pass_ticks = 0;
+        self.abort_cooldown = 0;
+        self.stuck_ticks = 0;
+        self.reverse_ticks = 0;
+    }
+
     pub fn pass_stats(&self) -> PassStats {
         self.pass_stats
     }

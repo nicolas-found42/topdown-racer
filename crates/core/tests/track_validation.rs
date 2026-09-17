@@ -16,3 +16,12 @@ fn duplicate_vertices_are_rejected_with_the_segment_index() {
         );
     }
 }
+
+#[test]
+fn nearly_duplicate_vertices_are_rejected() {
+    let text = r#"{"name":"Tiny segment","width":10,"points":[[0,0],[0.00001,0],[10,0],[10,10],[0,0]],"surfaces":[]}"#;
+    assert!(
+        Track::parse(text).is_err(),
+        "near-zero segment must not produce an unstable gate"
+    );
+}

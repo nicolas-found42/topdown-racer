@@ -44,8 +44,11 @@ fn pause_actions(
         ResMut<ControlGate>,
         ResMut<SteeringFilter>,
     ),
-    mut next: ResMut<NextState<AppState>>,
-    mut notice: ResMut<PauseNotice>,
+    (mut next, mut notice, records): (
+        ResMut<NextState<AppState>>,
+        ResMut<PauseNotice>,
+        Option<Res<crate::records::LocalRecords>>,
+    ),
 ) {
     let focus_lost = focused.read().any(|event| !event.focused);
     if focus_lost || keys.just_pressed(KeyCode::Escape) {
@@ -86,6 +89,9 @@ fn pause_actions(
         }
         Action::Restart => {
             shell.reset_to_fresh_race();
+            shell.practice_baseline = records
+                .as_ref()
+                .and_then(|records| records.book.best(&crate::practice::record_key(&shell)));
             notice.0.clear();
         }
         Action::Menu => next.set(AppState::Menu),

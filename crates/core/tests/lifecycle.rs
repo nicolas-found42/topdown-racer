@@ -167,3 +167,29 @@ fn practice_scripted_manual_commands_finish_and_retry_identically() {
     }
     panic!("section never finished");
 }
+
+#[test]
+fn pause_recovery_is_available_but_frozen_time_cannot_bypass_cooldown() {
+    use glam::Vec2;
+    use topdown_racer_core::simulation::{GridCar, RecoveryError};
+    let mut sim = Sim::from_grid(
+        Track::parse(HILLSIDE_CIRCUIT).unwrap(),
+        &[GridCar {
+            pose: Vec2::new(50.0, 40.0),
+            heading: 0.0,
+            velocity: Vec2::ZERO,
+        }],
+    );
+    sim.pause();
+    sim.recover_player().unwrap();
+    let frozen = sim.snapshots();
+    for _ in 0..500 {
+        assert_eq!(sim.tick(&[]), frozen);
+    }
+    assert_eq!(sim.recover_player(), Err(RecoveryError::Cooldown));
+    sim.resume();
+    for _ in 0..64 {
+        sim.tick(&[]);
+    }
+    assert_eq!(sim.recover_player(), Err(RecoveryError::Cooldown));
+}

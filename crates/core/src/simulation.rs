@@ -400,7 +400,7 @@ impl Sim {
                 0,
                 match mode {
                     DrivingMode::Manual => None,
-                    DrivingMode::Autopilot => Some(AiDriver::new(0)),
+                    DrivingMode::Autopilot => Some(AiDriver::with_pace(0, self.opponent_pace)),
                 },
             );
         }
@@ -595,14 +595,11 @@ impl Sim {
     }
 
     /// Returns behind the last validated checkpoint, with no checkpoint credit.
-    /// Requires speed below 1 u/s and three seconds of active time between uses.
+    /// Available from Pause as well as active racing, below 1 u/s. The three-second
+    /// cooldown advances only with racing ticks; pause/preparation cannot bypass it.
     pub fn recover_player(&mut self) -> Result<(), RecoveryError> {
         let car = self.cars.first().ok_or(RecoveryError::Unavailable)?;
-        if self.paused
-            || self.resume_ticks > 0
-            || self.phase != RacePhase::Racing
-            || car.finish_status != FinishStatus::Racing
-        {
+        if self.phase != RacePhase::Racing || car.finish_status != FinishStatus::Racing {
             return Err(RecoveryError::Unavailable);
         }
         if car
@@ -634,8 +631,8 @@ impl Sim {
                 .distance(self.track.points[car.next_checkpoint])
                 .max(car.recovery_distance_floor.unwrap_or(0.0)),
         );
-        if car.ai.is_some() {
-            car.ai = Some(AiDriver::new(0));
+        if let Some(driver) = &mut car.ai {
+            driver.reset_after_recovery();
         }
         car.pose = pose;
         car.heading = direction.y.atan2(direction.x);
