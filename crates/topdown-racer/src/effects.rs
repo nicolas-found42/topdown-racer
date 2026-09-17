@@ -363,6 +363,57 @@ fn render_brake_lights(
 mod skid_lifecycle_tests {
     use super::*;
     use topdown_racer_core::{simulation::Sim, track::Track};
+    #[test]
+    fn pause_and_preparation_preserve_visible_particles_until_active_ticks_resume() {
+        let track = Track::parse(topdown_racer_core::track::HILLSIDE_CIRCUIT).unwrap();
+        let mut app = App::new();
+        app.insert_resource(ShellSimulation::from_sim(Sim::new(track, 1)))
+            .insert_resource(DrivingEffects {
+                generation: 0,
+                race_generation: 0,
+                decals: SkidDecals::new(SKID_BUDGET),
+                particles: VecDeque::from([Particle {
+                    pose: Vec2::new(2.0, 3.0),
+                    heading: 0.0,
+                    kind: ParticleKind::Dust,
+                    age: 23,
+                }]),
+                tick: 0,
+            })
+            .add_systems(Update, advance_effects);
+        app.world_mut()
+            .resource_mut::<ShellSimulation>()
+            .sim
+            .pause();
+        for _ in 0..200 {
+            app.update();
+            let effects = app.world().resource::<DrivingEffects>();
+            assert_eq!(effects.particles.len(), 1);
+            assert_eq!(effects.particles[0].age, 23);
+            assert_eq!(effects.particles[0].pose, Vec2::new(2.0, 3.0));
+        }
+        app.world_mut()
+            .resource_mut::<ShellSimulation>()
+            .sim
+            .resume();
+        for _ in 0..64 {
+            app.update();
+            assert_eq!(
+                app.world().resource::<DrivingEffects>().particles[0].age,
+                23
+            );
+            app.world_mut()
+                .resource_mut::<ShellSimulation>()
+                .sim
+                .tick(&[]);
+        }
+        app.update();
+        assert!(app
+            .world()
+            .resource::<DrivingEffects>()
+            .particles
+            .is_empty());
+    }
 
     #[test]
     fn recovery_preserves_marks_but_restart_clears_them() {
