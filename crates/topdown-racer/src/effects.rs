@@ -323,7 +323,9 @@ fn render_particles(
                     _ => textures.dust.clone(),
                 };
                 sprite.custom_size = Some(Vec2::splat(2.0));
-                sprite.color = Color::srgba(1.0, 1.0, 1.0, alpha);
+                // Keep the road edge and a following rival readable even when
+                // smoke and dust overlap. Trigger cadence/lifetimes are unchanged.
+                sprite.color = Color::srgba(1.0, 1.0, 1.0, alpha * 0.45);
             }
             ParticleKind::Streak => {
                 *texture = Handle::default();

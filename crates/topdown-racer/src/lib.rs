@@ -345,6 +345,21 @@ fn setup_car(mut commands: Commands, asset_server: Res<AssetServer>, sim: Res<Sh
                 CarSprite { car_index: i },
             ))
             .with_children(|car| {
+                if i == 0 {
+                    car.spawn((
+                        SpriteBundle {
+                            sprite: Sprite {
+                                color: palette::color(palette::CREAM_HIGHLIGHT),
+                                custom_size: Some(Vec2::new(0.375, 2.75)),
+                                ..default()
+                            },
+                            transform: Transform::from_xyz(2.125, 0.0, 0.06),
+                            visibility: Visibility::Hidden,
+                            ..default()
+                        },
+                        feedback::ImpactFlash,
+                    ));
+                }
                 for side in [-1.0, 1.0] {
                     car.spawn((
                         SpriteBundle {

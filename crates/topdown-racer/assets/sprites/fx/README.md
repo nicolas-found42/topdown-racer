@@ -1,17 +1,17 @@
 # Driving FX assets
 
-`smoke.png` and `dust.png` derive from `PNG (Transparent)/smoke_08.png`
-in Kenney's [Particle Pack](https://kenney.nl/assets/particle-pack), CC0.
-The original grant is retained in `Kenney-License.txt`.
+`smoke.png` and `dust.png` are original 16×16 RGBA pixel silhouettes made for
+this project (#55), under the repository's asset policy. No external game's
+art is used. They replace the former Kenney-derived flat square imports;
+`Kenney-License.txt` remains as provenance of that earlier import only.
 
-Import uses FFmpeg once, before committing the processed assets:
+Both stamps use a stepped union of four ellipses (centres/radii in texels:
+6,8/5,5; 9,5/4,4; 10,10/4,4; 4,6/3,3). Pixels outside the union are transparent;
+the outer band has half alpha. Smoke uses Rival White (237,241,244), maximum
+alpha 192; dust uses Dirt Light (216,154,94), maximum alpha 160. Runtime opacity
+is capped at 45% and fades over the existing lifetime. This leaves road edges
+and nearby rivals legible when the two cues overlap.
 
-```sh
-ffmpeg -i smoke_08.png -vf 'scale=16:16:flags=area,lutrgb=r=237:g=241:b=244:a=if(lt(val\,48)\,0\,192)' -frames:v 1 smoke.png
-ffmpeg -i smoke_08.png -vf 'scale=16:16:flags=area,lutrgb=r=216:g=154:b=94:a=if(lt(val\,48)\,0\,160)' -frames:v 1 dust.png
-```
-
-RGB uses the project palette's Rival White and Dirt Light. Alpha is reduced
-to transparent/one translucent value; the runtime only fades opacity. Each
-16-texel stamp is exactly two world units at 8 texels/unit, with nearest
-sampling and no growing/rescaled puff animation.
+Each stamp remains exactly two world units at 8 texels/unit with nearest
+sampling, no growing puff animation, and unchanged trigger/cadence/lifetime.
+Audio is original procedural PCM synthesized by `audio.rs`/`feedback.rs`.
