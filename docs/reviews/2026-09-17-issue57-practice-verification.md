@@ -26,9 +26,9 @@ attempt never appears as a race record; `.scratch/issue-57-records.json` shows s
 ## Race restoration
 After Esc from practice results, the shell returned to ordinary Race with four Cars, three-lap rules,
 normal grid, no practice session, and no practice key in race entries (assertions in
-`crates/topdown-racer/examples/issue57_capture.rs`; screenshot `race-restored.png` was captured but
-emitted zero bytes because the app exits the same frame, so only console assertions verify this
-capture).
+`crates/topdown-racer/examples/issue57_capture.rs`; screenshot `race-restored.png` was requested at
+probe age 30 but emitted zero bytes for an undetermined reason. Exit is requested at probe age 60,
+so only console assertions verify this state).
 
 ## Honest limitation
 These are scripted digital Manual inputs (AiDriver pacing plan + keyboard injection) verified against

@@ -66,7 +66,11 @@ fn recovery_is_slow_safe_rate_limited_and_invalidates_the_lap() {
             },
         ],
     );
-    assert_eq!(occupied.recover_player(), Err(RecoveryError::Occupied));
+    occupied.recover_player().unwrap();
+    let recovered = occupied.snapshots()[0];
+    assert!(recovered.pose.distance(blocker) >= 6.0);
+    assert_eq!(recovered.completed_laps, 0);
+    assert!(recovered.current_lap_invalidated);
 }
 
 #[test]

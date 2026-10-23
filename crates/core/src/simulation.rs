@@ -91,7 +91,7 @@ impl RecoveryError {
     pub fn message(self) -> &'static str {
         match self {
             Self::TooFast => "Slow below 1 u/s before recovery",
-            Self::Occupied => "Recovery position occupied; wait for rivals to pass",
+            Self::Occupied => "No clear recovery position available",
             Self::Cooldown => "Recovery available after 3 seconds of Race time",
             Self::Unavailable => "Recovery unavailable outside active racing",
         }
@@ -596,6 +596,8 @@ impl Sim {
     /// Returns behind the last validated checkpoint, with no checkpoint credit.
     /// Available from Pause as well as active racing, below 1 u/s. The three-second
     /// cooldown advances only with racing ticks; pause/preparation cannot bypass it.
+    /// Searches backward in one-unit steps along the preceding Track segment,
+    /// keeping the original five-unit setback as the first candidate.
     pub fn recover_player(&mut self) -> Result<(), RecoveryError> {
         let car = self.cars.first().ok_or(RecoveryError::Unavailable)?;
         if self.phase != RacePhase::Racing || car.finish_status != FinishStatus::Racing {
@@ -617,16 +619,27 @@ impl Sim {
             .take(car.last_cleared_checkpoint)
             .map(|pair| pair[0].distance(pair[1]))
             .sum();
-        let pose = self.track.point_at_arc(arc - 5.0);
+        let segments = self.track.points.len() - 1;
+        let previous = (car.last_cleared_checkpoint + segments - 1) % segments;
+        // Do not search around the whole circuit: wrapping into an unvalidated
+        // segment could put the Car just before its next checkpoint as a shortcut.
+        // On very short segments retain the existing five-unit setback.
+        let max_setback = self.track.points[previous]
+            .distance(self.track.points[previous + 1])
+            .max(5.0);
+        let pose = (0..=(max_setback - 5.0).ceil() as usize)
+            .map(|step| {
+                self.track
+                    .point_at_arc(arc - (5.0 + step as f32).min(max_setback))
+            })
+            .find(|candidate| {
+                self.cars
+                    .iter()
+                    .skip(1)
+                    .all(|rival| rival.pose.distance(*candidate) >= 6.0)
+            })
+            .ok_or(RecoveryError::Occupied)?;
         let direction = self.track.centerline_frame(pose).direction;
-        if self
-            .cars
-            .iter()
-            .skip(1)
-            .any(|rival| rival.pose.distance(pose) < 6.0)
-        {
-            return Err(RecoveryError::Occupied);
-        }
         let car = &mut self.cars[0];
         car.recovery_distance_floor = Some(
             car.pose
@@ -2671,14 +2684,73 @@ mod tests {
     }
 
     #[test]
-    fn recovery_respects_finished_car_clearance() {
-        let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 2);
-        sim.cars[0].pose = Vec2::new(50.0, 40.0);
-        sim.cars[1].pose = sim.track.spawn_pose(5.0);
-        sim.cars[1].finish_status = FinishStatus::Finished { place: 1 };
+    fn recovery_finds_clear_space_behind_finished_and_dnf_cars() {
+        for status in [FinishStatus::Finished { place: 1 }, FinishStatus::Dnf] {
+            for checkpoint in [0, 3, 6] {
+                let mut sim = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 3);
+                sim.cars[0].pose = Vec2::new(50.0, 40.0);
+                sim.cars[0].last_cleared_checkpoint = checkpoint;
+                sim.cars[0].next_checkpoint = checkpoint + 1;
+                let arc: f32 = sim
+                    .track
+                    .points
+                    .windows(2)
+                    .take(checkpoint)
+                    .map(|pair| pair[0].distance(pair[1]))
+                    .sum();
+                for (rival, distance) in sim.cars.iter_mut().skip(1).zip([5.0, 12.0]) {
+                    rival.pose = sim.track.point_at_arc(arc - distance);
+                    rival.finish_status = status;
+                }
+                sim.pause();
+                let before = sim.snapshots()[0];
+                sim.recover_player().unwrap();
+                let recovered = sim.snapshots()[0];
+                assert!(sim.is_paused());
+                assert_ne!(recovered.surface, Surface::Grass);
+                assert_eq!(recovered.velocity, Vec2::ZERO);
+                assert_eq!(recovered.completed_laps, before.completed_laps);
+                assert!(recovered.position >= before.position);
+                assert_eq!(sim.cars[0].next_checkpoint, checkpoint + 1);
+                assert_eq!(sim.cars[0].last_cleared_checkpoint, checkpoint);
+                assert!(recovered.current_lap_invalidated);
+                let previous = (checkpoint + 6) % 7;
+                assert_eq!(
+                    sim.track.nearest_segment(recovered.pose).segment_index,
+                    previous
+                );
+                let direction =
+                    (sim.track.points[previous + 1] - sim.track.points[previous]).normalize();
+                assert!((recovered.heading - direction.y.atan2(direction.x)).abs() < 0.001);
+                for rival in sim.cars.iter().skip(1) {
+                    assert!(recovered.pose.distance(rival.pose) >= 6.0);
+                }
+                assert_eq!(sim.recover_player(), Err(RecoveryError::Cooldown));
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_reports_occupied_without_mutation_when_the_previous_segment_is_full() {
+        let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+        let blockers: Vec<_> = (0..=18)
+            .map(|step| GridCar {
+                pose: track.spawn_pose(step as f32 * 5.0),
+                heading: 0.0,
+                velocity: Vec2::ZERO,
+            })
+            .collect();
+        let mut grid = vec![GridCar {
+            pose: Vec2::new(50.0, 40.0),
+            heading: 2.0,
+            velocity: Vec2::ZERO,
+        }];
+        grid.extend(blockers);
+        let mut sim = Sim::from_grid(track, &grid);
         let before = sim.snapshots();
         assert_eq!(sim.recover_player(), Err(RecoveryError::Occupied));
         assert_eq!(sim.snapshots(), before);
+        assert_eq!(sim.cars[0].last_recovery_tick, None);
     }
 
     #[test]

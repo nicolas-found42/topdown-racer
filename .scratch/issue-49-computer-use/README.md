@@ -42,9 +42,9 @@ hold, followed by release and two seconds without input, produced:
 | `28-native-throttle-release.png` | Immediately after held W release: `MANUAL`, `SPEED 25 u/s`, lap time `00:40.78` |
 | `29-native-coast.png` | Two seconds after release: `MANUAL`, `SPEED 6 u/s`, lap time `00:42.86` |
 | `30-native-steering-release.png` | After a one-second W+A hold and release: `MANUAL`, `SPEED 16 u/s` |
-| `21-manual-after-toggle.png` | T back from Autopilot: `MANUAL | LAP ASSISTED`, `SPEED 8 u/s` |
-| `22-paused-label.png` | Pause retains `MANUAL | LAP ASSISTED` |
-| `23-after-resume-label.png` | Resume preparation (`READY`) retains `MANUAL | LAP ASSISTED` |
+| `21-manual-after-toggle.png` | T back from Autopilot: `MANUAL \| LAP ASSISTED`, `SPEED 8 u/s` |
+| `22-paused-label.png` | Pause retains `MANUAL \| LAP ASSISTED` |
+| `23-after-resume-label.png` | Resume preparation (`READY`) retains `MANUAL \| LAP ASSISTED` |
 | `31-car-sprite-verified.png` | Proper `BEVY_ASSET_ROOT` asset root / Cargo example execution: Hero GT Car Sprite and rivals render crisply with liveries and turned wheels |
 
 Held-input latching and release/coasting are additionally asserted through the
