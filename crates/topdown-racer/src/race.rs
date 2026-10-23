@@ -571,7 +571,10 @@ mod tests {
         app.update();
         let shell = app.world().resource::<ShellSimulation>();
         assert!(!shell.sim.is_paused());
-        assert_eq!(shell.sim.preparation_ticks(), 64);
+        assert_eq!(
+            shell.sim.preparation_ticks(),
+            topdown_racer_core::simulation::FIXED_HZ as u32
+        );
     }
     #[test]
     fn pause_restart_keeps_the_stored_practice_target() {

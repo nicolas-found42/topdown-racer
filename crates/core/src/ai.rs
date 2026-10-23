@@ -7,10 +7,7 @@
 
 use glam::Vec2;
 
-use crate::simulation::{
-    wrap_angle, CarInput, BRAKE_ACCEL, LATERAL_GRIP_RATE, MAX_ANGULAR_VEL, STEER_SENSITIVITY,
-    TOP_SPEED,
-};
+use crate::simulation::{wrap_angle, CarInput, BRAKE_ACCEL, TOP_SPEED};
 use crate::track::{Surface, Track};
 
 /// Fixed driver pace; only the planned speed envelope changes. The slot's
@@ -79,9 +76,6 @@ impl AiView<'_> {
 const SAMPLE_STEP: f32 = 2.0;
 /// Number of plan samples: a 72-unit horizon covers full-speed braking with margin.
 const PLAN_SAMPLES: usize = 36;
-/// Lateral-slip allowance the speed plan holds (world units/s), set just
-/// under the physics drift threshold so planned corners stay gripped.
-const SLIP_ALLOWANCE: f32 = 1.0;
 /// Tightest turn radius the plan assumes the Car can use by cutting inside a
 /// corner (bounded by road width). Centerline samples at polyline vertices
 /// report far higher curvature than any drivable line, so clamp there.
@@ -89,23 +83,19 @@ const PATH_MIN_RADIUS: f32 = 8.0;
 /// Fraction of full braking the plan assumes, leaving a margin for error.
 const PLAN_BRAKE_FRACTION: f32 = 0.7;
 /// Aim-point lookahead scales with speed, clamped to a sane window.
-const AIM_SPEED_SCALE: f32 = 0.6;
-const AIM_MIN: f32 = 6.0;
+const AIM_SPEED_SCALE: f32 = 0.9;
+const AIM_MIN: f32 = 10.0;
 const AIM_MAX: f32 = 26.0;
 /// How strongly upcoming curvature pulls the chosen line toward the inside.
-const APEX_BIAS_GAIN: f32 = 24.0;
+const APEX_BIAS_GAIN: f32 = 12.0;
 /// Lateral margin the line keeps from the road edges.
 const EDGE_MARGIN: f32 = 2.0;
-/// Steering proportional gain on the angle to the aim point.
-const STEER_GAIN: f32 = 3.0;
 /// Countersteer gain against current lateral slip (catches slides).
 const COUNTERSTEER_GAIN: f32 = 0.15;
 /// Speed error above target that maps to full brake.
 const BRAKE_ERROR_FULL: f32 = 6.0;
 /// Speed error below target that maps to full throttle.
 const THROTTLE_ERROR_FULL: f32 = 4.0;
-/// Fraction of throttle cut when steering hard at speed (avoids understeer).
-const TRACTION_CUT: f32 = 0.35;
 /// Rival perception window ahead and to the sides.
 const AVOID_RANGE: f32 = 28.0;
 const AVOID_LATERAL: f32 = 4.0;
@@ -117,20 +107,17 @@ const FOLLOW_GAP: f32 = 9.0;
 /// counts as blocking the same corridor.
 const SAME_CORRIDOR_LATERAL: f32 = 2.0;
 /// Per-tick blending of the chosen line toward its new target (~0.2 s commitment).
-const LINE_SMOOTHING: f32 = 0.08;
+const LINE_SMOOTHING: f32 = 0.0435;
 /// Reverse recovery tuning.
 const STUCK_SPEED: f32 = 0.5;
-const STUCK_TICKS_LIMIT: u32 = 48;
-const REVERSE_TICKS: u32 = 64;
+const STUCK_TICKS_LIMIT: u32 = (crate::simulation::FIXED_HZ * 0.75) as u32;
+const REVERSE_TICKS: u32 = 2 * crate::simulation::FIXED_HZ as u32;
 /// Heading error vs the Track direction that counts as facing the wrong way.
 const FACING_AWAY_ANGLE: f32 = 2.2;
 /// Speed below which the facing-away trigger may fire.
 const REVERSE_SPEED_CAP: f32 = 6.0;
 /// Speed-plan scale while off the authored surface.
 const OFF_TRACK_SPEED_FACTOR: f32 = 0.45;
-/// Handbrake rotation assist: large heading error at speed.
-const HANDBRAKE_ANGLE: f32 = 1.1;
-const HANDBRAKE_SPEED: f32 = 13.0;
 
 /// Deterministic encounter diagnostics, counted once per committed move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -157,6 +144,11 @@ pub struct AiDriver {
     pass_stats: PassStats,
     /// Consecutive ticks below the stuck speed while demanding drive.
     stuck_ticks: u32,
+    traffic_wait_ticks: u32,
+    previous_heading: Option<f32>,
+    previous_steer: f32,
+    previous_forward_speed: f32,
+    steady_ticks: u32,
     /// Remaining ticks in reverse-and-recover mode (0 = normal driving).
     reverse_ticks: u32,
 }
@@ -179,6 +171,11 @@ impl AiDriver {
             abort_cooldown: 0,
             pass_stats: PassStats::default(),
             stuck_ticks: 0,
+            traffic_wait_ticks: 0,
+            previous_heading: None,
+            previous_steer: 0.0,
+            previous_forward_speed: 0.0,
+            steady_ticks: 0,
             reverse_ticks: 0,
         }
     }
@@ -193,6 +190,11 @@ impl AiDriver {
         self.abort_cooldown = 0;
         self.stuck_ticks = 0;
         self.reverse_ticks = 0;
+        self.traffic_wait_ticks = 0;
+        self.previous_heading = None;
+        self.previous_steer = 0.0;
+        self.previous_forward_speed = 0.0;
+        self.steady_ticks = 0;
     }
 
     pub fn pass_stats(&self) -> PassStats {
@@ -203,7 +205,18 @@ impl AiDriver {
     pub fn compute_input(&mut self, view: AiView<'_>) -> CarInput {
         let fwd = Vec2::new(view.heading.cos(), view.heading.sin());
         let left = Vec2::new(-fwd.y, fwd.x);
+        let yaw_rate = self.previous_heading.map_or(0.0, |heading| {
+            wrap_angle(view.heading - heading) / crate::simulation::FIXED_DT
+        });
+        self.previous_heading = Some(view.heading);
         let vf = view.velocity.dot(fwd);
+        let acceleration = (vf - self.previous_forward_speed) / crate::simulation::FIXED_DT;
+        self.previous_forward_speed = vf;
+        self.steady_ticks = if vf > 5.0 && acceleration.abs() < 1.0 {
+            self.steady_ticks + 1
+        } else {
+            0
+        };
         let vl = view.velocity.dot(left);
 
         let frame = view.track.centerline_frame(view.pose);
@@ -241,6 +254,11 @@ impl AiDriver {
                     && rel.dot(left).abs() < 3.2
                     && velocity.dot(fwd) < STUCK_SPEED
             });
+        self.traffic_wait_ticks = if vf.abs() < STUCK_SPEED && waiting_for_traffic {
+            self.traffic_wait_ticks + 1
+        } else {
+            0
+        };
         if vf.abs() < STUCK_SPEED && !waiting_for_traffic {
             self.stuck_ticks += 1;
         } else {
@@ -311,11 +329,11 @@ impl AiDriver {
                 let blocked = !lane_clear(lane);
                 if blocked
                     || ahead.is_none_or(|gap| gap > AVOID_RANGE + 10.0)
-                    || self.pass_ticks > 384
+                    || self.pass_ticks > (6.0 * crate::simulation::FIXED_HZ) as u32
                 {
                     self.pass_stats.aborted += 1;
                     self.pass_target = None;
-                    self.abort_cooldown = 96;
+                    self.abort_cooldown = (1.5 * crate::simulation::FIXED_HZ) as u32;
                 }
             }
         }
@@ -333,18 +351,40 @@ impl AiDriver {
             let future_lateral = lateral + other_vel.dot(left) * 1.5;
             let crossing_corridor = future_lateral.abs() < 3.2 || lateral * future_lateral < 0.0;
             if ahead <= 0.0
-                || ahead > AVOID_RANGE
+                || ahead
+                    > AVOID_RANGE.max(
+                        vf.max(0.0).powi(2) / (2.0 * BRAKE_ACCEL * PLAN_BRAKE_FRACTION)
+                            + FOLLOW_GAP,
+                    )
                 || (lateral.abs() > AVOID_LATERAL && !crossing_corridor)
             {
                 continue;
             }
             let closing = vf - other_vel.dot(fwd);
+            // A stationary queue is not a series of independent obstructions.
+            // Let the front Car clear its blocker before trying to pass its followers.
+            let rival_direction = view.track.centerline_frame(other_pose).direction;
+            let rival_is_queued = view.field.iter().enumerate().any(|(index, (pose, _))| {
+                let relative = *pose - other_pose;
+                index != j
+                    && view.active_rival(index)
+                    && relative.dot(rival_direction) > 0.0
+                    && relative.dot(rival_direction) < FOLLOW_GAP + 2.0
+                    && relative.dot(rival_direction.perp()).abs() < 3.2
+            });
 
             // Pass on the side the rival is not occupying; a Car dead ahead
             // or to the left is passed on the right.
-            if self.pass_target.is_none()
+            if ahead <= AVOID_RANGE
+                && self.pass_target.is_none()
                 && self.abort_cooldown == 0
                 && target_speed - other_vel.dot(fwd) > 0.2
+                && (closing > 0.5
+                    || (self.steady_ticks > (crate::simulation::FIXED_HZ * 0.5) as u32
+                        && ahead < FOLLOW_GAP + 2.0
+                        && centerline_curvature(view.track, aim_arc).abs() < 0.01)
+                    || (self.traffic_wait_ticks > (crate::simulation::FIXED_HZ * 0.5) as u32
+                        && !rival_is_queued))
             {
                 let aim_center = view.track.point_at_arc(aim_arc);
                 let aim_direction =
@@ -405,7 +445,7 @@ impl AiDriver {
             }
             let gap = (pose - view.pose).dot(frame.direction);
             let lateral = view.track.centerline_frame(pose).lateral;
-            if gap.abs() <= 4.41 && (lateral - frame.lateral).abs() > 0.5 {
+            if gap.abs() <= 7.0 && (lateral - frame.lateral).abs() > 0.5 {
                 if lateral > frame.lateral {
                     lane_max = lane_max.min(lateral - 3.2);
                 } else {
@@ -434,34 +474,59 @@ impl AiDriver {
         let aim = aim_center + normal_at_aim * self.line_offset;
         let to_aim = aim - view.pose;
         let angle_diff = wrap_angle(to_aim.y.atan2(to_aim.x) - view.heading);
-        let mut steer = (angle_diff * STEER_GAIN - vl * COUNTERSTEER_GAIN).clamp(-1.0, 1.0);
+        let curvature = 2.0 * angle_diff.sin() / to_aim.length().max(1.0);
+        let mut steer = ((crate::vehicle::WHEELBASE * curvature).atan()
+            / crate::vehicle::MAX_STEER
+            - vl * COUNTERSTEER_GAIN / vf.abs().max(3.0))
+        .clamp(-1.0, 1.0);
+        // A standing pass needs the Car's full low-speed turning radius;
+        // high-speed pure-pursuit lookahead otherwise noses into the blocker.
+        if vf.abs() < 5.0
+            && self
+                .pass_target
+                .is_some_and(|(rival, _)| view.field[rival].1.length() < STUCK_SPEED)
+        {
+            steer = (angle_diff * 2.5).clamp(-1.0, 1.0);
+        }
         if off_track {
             steer = (steer * 1.5).clamp(-1.0, 1.0);
         }
+        // Estimate axle slip from perceived motion, without reading or changing physics.
+        let front_slip = (self.previous_steer * crate::vehicle::MAX_STEER
+            - (vl + yaw_rate * (crate::vehicle::WHEELBASE * 0.5)).atan2(vf.abs().max(1.0)))
+        .abs();
+        let rear_slip = (vl - yaw_rate * (crate::vehicle::WHEELBASE * 0.5))
+            .atan2(vf.abs().max(1.0))
+            .abs();
+        if rear_slip > front_slip && rear_slip > 0.13 {
+            steer = (steer * (front_slip / rear_slip).clamp(0.2, 1.0)
+                + vl / vf.abs().max(3.0) * 0.4)
+                .clamp(-1.0, 1.0);
+        }
+        self.previous_steer = steer;
 
-        // Pedals: proportional to the speed error against the plan. The
-        // driver lifts off through hard steering at speed and reaches for the
-        // handbrake only to rotate through a large heading error at speed.
-        let handbrake = angle_diff.abs() > HANDBRAKE_ANGLE && vf > HANDBRAKE_SPEED;
-        let (mut throttle, brake) = if vf > target_speed + 0.5 {
+        // Pedals follow the tire-limited plan, reserving rear grip on exit.
+        let (throttle, brake) = if vf > target_speed + 0.5 {
             (
                 0.0,
                 ((vf - target_speed) / BRAKE_ERROR_FULL).clamp(0.0, 1.0),
             )
         } else {
             let mut throttle = ((target_speed - vf) / THROTTLE_ERROR_FULL).clamp(0.0, 1.0);
-            throttle *= 1.0 - TRACTION_CUT * steer.abs() * (vf / TOP_SPEED).clamp(0.0, 1.0);
+            // Reserve tire authority for the planned corner instead of asking the
+            // rear axle for full launch torque and full cornering simultaneously.
+            let lateral_usage = (vf * vf * curvature.abs()
+                / (crate::vehicle::lateral_limit(surface) * 0.8))
+                .clamp(0.0, 1.0);
+            let launch_limit = if vf < 12.0 { 0.55 } else { 1.0 };
+            throttle = throttle.min(launch_limit * (1.0 - lateral_usage * lateral_usage).sqrt());
             (throttle, 0.0)
         };
-        if handbrake {
-            throttle = 0.0;
-        }
-
         CarInput {
             throttle,
             brake,
             steer,
-            handbrake,
+            handbrake: false,
         }
     }
 
@@ -470,17 +535,13 @@ impl AiDriver {
     fn speed_plan(&self, track: &Track, arc: f32) -> [f32; PLAN_SAMPLES] {
         let mut plan = [0.0f32; PLAN_SAMPLES];
         for (i, slot) in plan.iter_mut().enumerate() {
-            // Holding curvature k at speed v needs yaw rate k*v. Steering
-            // caps the rate at MAX_ANGULAR_VEL, and the grip model settles at
-            // lateral slip v*(k*v)/LATERAL_GRIP_RATE which must stay gripped.
-            // Planned curvature is also capped at what full steering lock can
-            // deliver, so the plan never asks for an undrivable line.
-            let k = centerline_curvature(track, arc + i as f32 * SAMPLE_STEP)
+            let sample_arc = arc + i as f32 * SAMPLE_STEP;
+            let k = centerline_curvature(track, sample_arc)
                 .abs()
-                .clamp(1e-4, (1.0 / PATH_MIN_RADIUS).min(STEER_SENSITIVITY));
-            let grip_limit = (LATERAL_GRIP_RATE * SLIP_ALLOWANCE / k).sqrt();
-            let steer_limit = MAX_ANGULAR_VEL / k;
-            *slot = grip_limit.min(steer_limit).min(TOP_SPEED) * self.speed_scale;
+                .clamp(1e-4, 1.0 / PATH_MIN_RADIUS);
+            let surface = track.sample_surface(track.point_at_arc(sample_arc));
+            let grip_limit = (crate::vehicle::lateral_limit(surface) * 0.55 / k).sqrt();
+            *slot = grip_limit.min(TOP_SPEED) * self.speed_scale;
         }
         for i in (0..PLAN_SAMPLES - 1).rev() {
             let reachable = (plan[i + 1] * plan[i + 1]
@@ -623,7 +684,7 @@ mod tests {
                 .steer;
         }
         assert!(
-            wide_steer.abs() > uniform_steer.abs() + 0.05,
+            wide_steer.abs() > uniform_steer.abs() * 1.5,
             "wide-at-aim driver must commit wider than the uniform cap: \
              wide {wide_steer} vs uniform {uniform_steer}"
         );

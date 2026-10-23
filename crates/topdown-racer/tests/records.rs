@@ -61,9 +61,9 @@ fn incompatible_configurations_keep_separate_records() {
     // ...and distinct for genuinely different geometry.
     assert_ne!(track_identity(&sample), track_identity(&hillside));
 
-    let key_a = race_key(&sample, SteeringResponse::Raw);
-    let key_other_track = race_key(&hillside, SteeringResponse::Raw);
-    let key_other_steering = race_key(&sample, SteeringResponse::Smooth);
+    let key_a = race_key(&sample, SteeringResponse::Raw, true);
+    let key_other_track = race_key(&hillside, SteeringResponse::Raw, true);
+    let key_other_steering = race_key(&sample, SteeringResponse::Smooth, true);
     assert_ne!(key_a, key_other_track);
     assert_ne!(key_a, key_other_steering);
 
@@ -135,6 +135,7 @@ fn legacy_times_are_preserved_but_never_compared_to_current_records() {
     let key = race_key(
         &Track::parse(SAMPLE_CIRCUIT).unwrap(),
         SteeringResponse::Raw,
+        true,
     );
     let mut records = LocalRecords::from_path(path.clone());
     assert_eq!(records.book.best(&key), None);
@@ -200,5 +201,35 @@ fn old_time_only_records_preserve_race_targets_without_fabricating_exit_speed() 
     let book = RecordBook::load(&path);
     assert_eq!(book.best("race:a"), Some(30.0));
     assert_eq!(book.practice_best("practice:a"), None);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn old_handling_and_both_stability_policies_remain_separate_in_the_same_store() {
+    use topdown_racer::{
+        controls::SteeringResponse,
+        records::{race_key, track_identity, RecordBook},
+    };
+    use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
+    let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
+    let old = format!(
+        "race:{:016x}:handling1:manual-flying-gate2:Raw",
+        track_identity(&track)
+    );
+    let on = race_key(&track, SteeringResponse::Raw, true);
+    let off = race_key(&track, SteeringResponse::Raw, false);
+    let mut book = RecordBook::default();
+    book.consider(&old, 20., true);
+    book.consider(&on, 40., true);
+    assert_eq!(book.best(&off), None);
+    assert_eq!(book.best(&old), Some(20.));
+    assert_eq!(book.best(&on), Some(40.));
+    let path =
+        std::env::temp_dir().join(format!("racer-handling-policy-{}.json", std::process::id()));
+    book.save(&path).unwrap();
+    let loaded = RecordBook::load(&path);
+    assert_eq!(loaded.best(&old), Some(20.));
+    assert_eq!(loaded.best(&on), Some(40.));
+    assert_eq!(loaded.best(&off), None);
     std::fs::remove_file(path).unwrap();
 }

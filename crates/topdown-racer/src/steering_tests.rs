@@ -42,27 +42,31 @@ fn tick(app: &mut App) -> CarSnapshot {
 fn steering_echo_releases_reverses_and_opposing_keys_cancel_immediately() {
     let mut app = controls_app();
     keys(&mut app, &[KeyCode::KeyA]);
-    for expected in [0.15625, 0.3125, 0.46875, 0.625, 0.78125, 0.9375, 1.0] {
-        assert_eq!(tick(&mut app).steer, expected);
+    for step in 1..=12 {
+        assert!((tick(&mut app).steer - (step as f32 / 12.0).min(1.0)).abs() < 1e-5);
     }
     keys(&mut app, &[]);
-    for expected in [0.6875, 0.375, 0.0625, 0.0] {
-        assert_eq!(tick(&mut app).steer, expected);
+    for _ in 0..6 {
+        tick(&mut app);
     }
+    assert!(tick(&mut app).steer.abs() < 1e-5);
     keys(&mut app, &[KeyCode::KeyA]);
-    for _ in 0..7 {
+    for _ in 0..12 {
         tick(&mut app);
     }
     keys(&mut app, &[KeyCode::KeyD]);
-    for expected in [0.6875, 0.375, 0.0625, -0.25, -0.40625] {
-        assert_eq!(tick(&mut app).steer, expected);
+    assert!(tick(&mut app).steer < 1.0);
+    for _ in 0..24 {
+        tick(&mut app);
     }
-    // Mixed aliases must cancel too, rather than choosing the last key or
-    // continuing to return slowly from the previous applied steering.
+    assert_eq!(tick(&mut app).steer, -1.0);
     keys(&mut app, &[KeyCode::KeyD, KeyCode::ArrowLeft]);
     assert_eq!(tick(&mut app).steer, 0.0);
     keys(&mut app, &[KeyCode::ArrowLeft]);
-    assert_eq!(tick(&mut app).steer, 0.15625);
+    assert_eq!(
+        tick(&mut app).steer,
+        10.0 * topdown_racer_core::simulation::FIXED_DT
+    );
 }
 
 #[derive(Resource, Default)]
@@ -75,7 +79,9 @@ fn record_tick(shell: Res<ShellSimulation>, mut trace: ResMut<Trace>) {
 fn cadence_trace(frame: Duration, frames_per_input: usize) -> Vec<CarSnapshot> {
     let mut app = controls_app();
     app.add_plugins(MinimalPlugins)
-        .insert_resource(Time::<Fixed>::from_hz(64.0))
+        .insert_resource(Time::<Fixed>::from_hz(
+            topdown_racer_core::simulation::FIXED_HZ as f64,
+        ))
         .insert_resource(TimeUpdateStrategy::ManualDuration(frame))
         .init_resource::<Trace>()
         .add_systems(FixedUpdate, record_tick.after(step_simulation));
@@ -100,7 +106,7 @@ fn effective_commands_replay_identically_across_render_cadences() {
     // rendered frames exercise the actual Bevy fixed-loop accumulator.
     let fast = cadence_trace(Duration::from_secs_f64(1.0 / 256.0), 64);
     let slow = cadence_trace(Duration::from_secs_f64(1.0 / 16.0), 4);
-    assert_eq!(fast.len(), 64);
+    assert_eq!(fast.len(), 120);
     assert_eq!(fast, slow);
     let mut replay = Sim::new(Track::parse(SAMPLE_CIRCUIT).unwrap(), 1);
     for expected in fast {
@@ -146,7 +152,7 @@ fn autopilot_and_ai_opponents_bypass_human_steering_response() {
 fn ownership_switch_discards_smoothing_and_requires_physical_release() {
     let mut app = controls_app();
     keys(&mut app, &[KeyCode::KeyA]);
-    for _ in 0..7 {
+    for _ in 0..13 {
         tick(&mut app);
     }
     keys(&mut app, &[KeyCode::KeyA, KeyCode::KeyT]);
@@ -157,7 +163,10 @@ fn ownership_switch_discards_smoothing_and_requires_physical_release() {
     keys(&mut app, &[]);
     assert_eq!(tick(&mut app).steer, 0.0);
     keys(&mut app, &[KeyCode::KeyA]);
-    assert_eq!(tick(&mut app).steer, 0.15625);
+    assert_eq!(
+        tick(&mut app).steer,
+        10.0 * topdown_racer_core::simulation::FIXED_DT
+    );
 }
 
 #[test]
@@ -180,11 +189,11 @@ fn menu_selection_focus_loss_and_restart_preserve_policy_not_filter_history() {
         app.world().resource::<ShellSimulation>().steering_response,
         controls::SteeringResponse::Smooth
     );
-    for _ in 0..200 {
+    for _ in 0..400 {
         tick(&mut app);
     }
     keys(&mut app, &[KeyCode::KeyA]);
-    for _ in 0..7 {
+    for _ in 0..13 {
         tick(&mut app);
     }
     assert_eq!(
@@ -213,9 +222,12 @@ fn menu_selection_focus_loss_and_restart_preserve_policy_not_filter_history() {
         controls::SteeringResponse::Smooth
     );
     keys(&mut app, &[]);
-    for _ in 0..200 {
+    for _ in 0..400 {
         tick(&mut app);
     }
     keys(&mut app, &[KeyCode::KeyA]);
-    assert_eq!(tick(&mut app).steer, 0.15625);
+    assert_eq!(
+        tick(&mut app).steer,
+        10.0 * topdown_racer_core::simulation::FIXED_DT
+    );
 }

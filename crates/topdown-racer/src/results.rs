@@ -136,7 +136,7 @@ pub fn spawn_results_ui(
 mod tests {
     use super::*;
     use crate::hud::sample_snapshot;
-    use topdown_racer_core::simulation::{CarInput, Sim};
+    use topdown_racer_core::simulation::Sim;
     use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
 
     fn results_snapshot(
@@ -195,33 +195,15 @@ mod tests {
         // A sim that completed a single lap is still racing, never finished.
         let track = Track::parse(SAMPLE_CIRCUIT).unwrap();
         let mut sim = Sim::new(track.clone(), 1);
-        let waypoints = &track.points[..track.points.len() - 1];
-        let mut current_wp = 1;
-        let mut last_pose = sim.tick(&[CarInput::default()])[0].pose;
-        let mut last_heading = 0.0f32;
+        sim.request_player_mode(topdown_racer_core::simulation::DrivingMode::Autopilot);
         let mut saw_lap_one_racing = false;
-        for _ in 0..1800 {
-            let target = waypoints[current_wp];
-            let to_target = target - last_pose;
-            let target_angle = to_target.y.atan2(to_target.x);
-            let angle_diff =
-                topdown_racer_core::simulation::wrap_angle(target_angle - last_heading);
-            let snap = sim.tick(&[CarInput {
-                throttle: if angle_diff.abs() > 0.4 { 0.5 } else { 1.0 },
-                brake: 0.0,
-                steer: (angle_diff * 2.5).clamp(-1.0, 1.0),
-                handbrake: false,
-            }])[0];
-            last_pose = snap.pose;
-            last_heading = snap.heading;
+        for _ in 0..8000 {
+            let snap = sim.tick(&[])[0];
             if snap.completed_laps == 1 {
                 assert_eq!(snap.phase, RacePhase::Racing);
                 assert!(!should_show_results(snap.phase));
                 saw_lap_one_racing = true;
                 break;
-            }
-            if (target - snap.pose).length() < 14.0 {
-                current_wp = (current_wp + 1) % waypoints.len();
             }
         }
         assert!(

@@ -314,6 +314,16 @@ pub(crate) fn sample_snapshot() -> CarSnapshot {
     use topdown_racer_core::simulation::RacePhase;
     use topdown_racer_core::track::Surface;
     CarSnapshot {
+        wheels: std::array::from_fn(|i| topdown_racer_core::simulation::WheelSnapshot {
+            local_position: topdown_racer_core::simulation::WHEEL_POSITIONS[i],
+            ..Default::default()
+        }),
+        yaw_rate: 0.0,
+        steering_angle: 0.0,
+        engine_rpm: 900.0,
+        gear: 1,
+        stability_assist: true,
+        assist_moment: 0.0,
         current_lap_invalidated: false,
         lap_invalidated: [false; 3],
         finish_status: Default::default(),
@@ -382,7 +392,7 @@ mod tests {
         assert_eq!(hud0.position, "POS 1st/4");
 
         // AI Car 1 accelerates ahead while Car 0 stays still
-        for _ in 0..100 {
+        for _ in 0..600 {
             sim.tick(&[CarInput::default()]);
         }
 

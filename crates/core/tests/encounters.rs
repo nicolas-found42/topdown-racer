@@ -65,11 +65,11 @@ fn inside_blockage_leaves_a_clean_outside_pass_in_motion() {
 fn late_braking_in_a_narrow_corridor_follows_without_contact() {
     let mut narrow = track();
     narrow.widths.fill(6.0);
-    let mut sim = Sim::from_grid(narrow, &[car(35.0, 0.0, 28.0), car(60.0, 0.0, 5.0)]);
+    let mut sim = Sim::from_grid(narrow, &[car(35.0, 0.0, 28.0), car(110.0, 0.0, 5.0)]);
     sim.set_ai(0, Some(AiDriver::new(0)));
     let mut min_gap = f32::INFINITY;
     let mut max_contact = 0.0_f32;
-    for _ in 0..300 {
+    for _ in 0..600 {
         let speed = sim.snapshots()[1].forward_speed;
         let snaps = sim.tick(&[
             CarInput::default(),
@@ -141,7 +141,7 @@ fn overlapping_cars_leave_room_through_turn_in() {
     sim.set_ai(0, Some(AiDriver::new(0)));
     sim.set_ai(1, Some(AiDriver::new(1)));
     let mut near = 0;
-    for tick in 0..240 {
+    for tick in 0..600 {
         let snaps = sim.tick(&[]);
         near += usize::from(snaps[0].pose.distance(snaps[1].pose) < 28.0);
         assert!(

@@ -1,0 +1,26 @@
+    Blocking waiting for file lock on build directory
+   Compiling topdown-racer-core v0.1.0 (/Users/nicolas/Documents/github/topdown-racer/crates/core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.97s
+     Running tests/vehicle_handling.rs (target/debug/deps/vehicle_handling-57c570b8abe31e2b)
+
+running 13 tests
+test a_straight_handbrake_locks_only_rear_wheels ... ok
+test steering_self_alignment_is_faster_than_turn_in ... ok
+test clipping_a_wall_loses_speed_and_applies_yaw_without_drift_credit ... ok
+test overspeed_entry_exceeds_front_grip_without_becoming_drift ... ok
+brake vs power curvature [0.023409434, 0.026481565], axle load difference [-595.4863, 888.87695]
+test rear_wheel_drive_spins_only_driven_wheels_and_a_full_slide_marks_all_four ... ok
+test trail_braking_loads_the_front_and_tightens_the_line_relative_to_power ... ok
+test hard_service_braking_marks_front_lockup_and_a_gripped_coast_loses_speed ... ok
+rear marks 719 drift ticks 315 longest 315
+test handbrake_locks_rear_wheels_and_countersteer_can_hold_drift_with_assist ... ok
+assist ticks 181; total yaw on 216.17535 off 431.24985
+test assist_never_changes_steering_and_remains_bounded_and_dissipative ... ok
+surface headings [0.6477116, 0.5053705, 0.36228558]
+test surface_grip_and_wheel_telemetry_are_deterministic ... ok
+test stationary_cars_and_reverse_are_stable_at_120hz ... ok
+test ordinary_corners_are_gripped_silent_telemetry_without_assist_intervention ... ok
+terminal speed 29.234297 gear 4 rpm 5853.8325
+test drivetrain_shifts_through_four_gears_and_reaches_the_calibrated_envelope ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s

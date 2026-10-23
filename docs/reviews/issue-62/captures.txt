@@ -1,0 +1,2 @@
+ordinary ticks=120 marks=0 wheel_slip_ticks=[0, 0, 0, 0] speed=14.706895 steering_angle=0.055000003 rpm=3950.907 gear=3
+handbrake ticks=120 marks=66 wheel_slip_ticks=[0, 0, 101, 101] speed=11.330788 steering_angle=0 rpm=4058.1433 gear=2

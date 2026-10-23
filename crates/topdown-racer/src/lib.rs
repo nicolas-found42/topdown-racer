@@ -25,8 +25,8 @@ pub mod world_bake;
 mod steering_tests;
 
 pub use audio::{
-    create_pcm_wav, engine_pitch_from_speed, generate_engine_loop_wav, generate_skid_loop_wav,
-    mute_audio, skid_volume_from_drift, unmute_audio, update_audio, EngineAudio, SkidAudio,
+    create_pcm_wav, engine_pitch_from_rpm, generate_engine_loop_wav, generate_skid_loop_wav,
+    mute_audio, tire_volume_from_wheels, unmute_audio, update_audio, EngineAudio, SkidAudio,
     DEFAULT_ENGINE_VOLUME,
 };
 pub use best_lap::{
@@ -92,7 +92,7 @@ pub struct FrontWheel {
 }
 
 /// Maximum visual yaw of a front wheel at full steering lock, in radians.
-pub const MAX_FRONT_WHEEL_ANGLE: f32 = 0.5;
+pub const MAX_FRONT_WHEEL_ANGLE: f32 = 0.55;
 
 /// Maps a steering demand (-1..1, positive left) to a front-wheel visual
 /// angle (counter-clockwise positive, matching Bevy rotation_z).
@@ -151,6 +151,7 @@ impl ShellSimulation {
         let track = self.sim.track().clone();
         let mode = self.sim.player_mode();
         let response = self.steering_response;
+        let assist = self.sim.stability_assist();
         let camera_mode = self.camera_mode;
         let generation = self.generation + 1;
         let race_generation = self.race_generation + 1;
@@ -161,6 +162,7 @@ impl ShellSimulation {
             TOTAL_RACE_CARS,
             self.selected_pace,
         ));
+        self.sim.set_stability_assist(assist);
         self.sim.request_player_mode(mode);
         self.steering_response = response;
         self.camera_mode = camera_mode;
@@ -172,6 +174,7 @@ impl ShellSimulation {
             let challenge =
                 topdown_racer_core::practice::CornerChallenge::hillside(self.sim.track());
             self.sim = challenge.start(self.sim.track().clone());
+            self.sim.set_stability_assist(assist);
             self.curr_snapshots = self.sim.snapshots();
             self.prev_snapshots = self.curr_snapshots.clone();
             self.practice = Some(topdown_racer_core::practice::PracticeAttempt::new(
@@ -476,7 +479,7 @@ pub fn read_keyboard_input(
     player_input.0 = if gate.0 { CarInput::default() } else { input };
 }
 
-/// Fixed step system: advances the simulation at 64 Hz using mapped player
+/// Fixed step system: advances the simulation at 120 Hz using mapped player
 /// inputs in Manual. Autopilot owns the player's entire input for the tick.
 fn step_simulation(
     mut shell: ResMut<ShellSimulation>,
@@ -531,8 +534,8 @@ pub(crate) fn update_front_wheel_steer(
             shell.prev_snapshots.get(wheel.car_index),
             shell.curr_snapshots.get(wheel.car_index),
         ) {
-            let steer = prev.steer + (curr.steer - prev.steer) * alpha;
-            tf.rotation = Quat::from_rotation_z(front_wheel_angle(steer));
+            let steer = prev.steering_angle + (curr.steering_angle - prev.steering_angle) * alpha;
+            tf.rotation = Quat::from_rotation_z(steer);
         }
     }
 }
@@ -644,7 +647,7 @@ mod tests {
         // Car is at standstill. Holding down/brake for 24 ticks (> 16 ticks threshold)
         let brake_input = map_keyboard_input(false, true, false, false, false);
         let mut snaps = Vec::new();
-        for _ in 0..24 {
+        for _ in 0..45 {
             snaps.extend(sim.tick(&[brake_input]));
         }
 
@@ -927,7 +930,11 @@ mod tests {
         let mut shell = ShellSimulation::new(track);
         for snapshots in [&mut shell.prev_snapshots, &mut shell.curr_snapshots] {
             for (k, snap) in snapshots.iter_mut().enumerate() {
-                snap.steer = if k == 0 { 1.0 } else { -1.0 };
+                snap.steering_angle = if k == 0 {
+                    MAX_FRONT_WHEEL_ANGLE
+                } else {
+                    -MAX_FRONT_WHEEL_ANGLE
+                };
             }
         }
         let mut app = App::new();

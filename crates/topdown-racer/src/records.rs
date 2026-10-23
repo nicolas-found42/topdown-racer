@@ -95,9 +95,13 @@ pub fn track_identity(track: &Track) -> u64 {
         })
 }
 
-pub fn race_key(track: &Track, steering: crate::controls::SteeringResponse) -> String {
+pub fn race_key(
+    track: &Track,
+    steering: crate::controls::SteeringResponse,
+    assist: bool,
+) -> String {
     format!(
-        "race:{:016x}:handling1:manual-flying-gate2:{steering:?}",
+        "race:{:016x}:handling2:manual-flying-gate2:{steering:?}:assist{assist}",
         track_identity(track)
     )
 }
@@ -160,7 +164,11 @@ pub(crate) fn persist_completed_laps(
         }
         return;
     }
-    let key = race_key(shell.sim.track(), shell.steering_response);
+    let key = race_key(
+        shell.sim.track(),
+        shell.steering_response,
+        shell.sim.stability_assist(),
+    );
     if let Some(best) = shell
         .curr_snapshots
         .first()
@@ -209,7 +217,7 @@ mod tests {
             .add_systems(Update, persist_completed_laps);
         app.update();
 
-        let key = race_key(&track, crate::controls::SteeringResponse::Raw);
+        let key = race_key(&track, crate::controls::SteeringResponse::Raw, true);
         assert_eq!(
             RecordBook::load(&path).best(&key),
             Some(28.5),
@@ -236,7 +244,7 @@ mod tests {
             .add_systems(Update, persist_completed_laps);
         app.update();
 
-        let key = race_key(&track, crate::controls::SteeringResponse::Raw);
+        let key = race_key(&track, crate::controls::SteeringResponse::Raw, true);
         assert_eq!(
             RecordBook::load(&path).best(&key),
             None,

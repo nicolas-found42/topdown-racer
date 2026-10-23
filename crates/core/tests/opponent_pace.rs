@@ -18,7 +18,7 @@ fn repeated_clean_solo_runs_order_the_three_paces() {
             for _ in 0..2 {
                 let mut sim = Sim::new(track.clone(), 1);
                 sim.set_ai(0, Some(AiDriver::with_pace(0, pace)));
-                for _ in 0..20000 {
+                for _ in 0..(300.0 * topdown_racer_core::simulation::FIXED_HZ) as u32 {
                     let snap = sim.tick(&[])[0];
                     assert!(!snap.wall_contact, "{pace:?} wall contact");
                     assert_ne!(snap.surface, Surface::Grass, "{pace:?} left the road");

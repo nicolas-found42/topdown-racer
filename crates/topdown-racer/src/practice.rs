@@ -12,10 +12,11 @@ impl Plugin for PracticePlugin {
 }
 pub(crate) fn record_key(shell: &ShellSimulation) -> String {
     format!(
-        "practice:{}:{:016x}:handling1:manual-section1:{:?}",
+        "practice:{}:{:016x}:handling2:manual-section1:{:?}:assist{}",
         CornerChallenge::ID,
         crate::records::track_identity(shell.sim.track()),
-        shell.steering_response
+        shell.steering_response,
+        shell.sim.stability_assist()
     )
 }
 fn draw_gates(shell: Res<ShellSimulation>, mut gizmos: Gizmos) {

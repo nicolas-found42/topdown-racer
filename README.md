@@ -44,13 +44,14 @@ keys, and a lap remains assisted even after switching back to Manual.
 | Esc | Pause during a Race; return to menu from results |
 | Enter / R / M / C while paused | Resume / Restart / Menu / Recover Car |
 | F / V in menu | Raw or Smooth steering / Centered or Look Ahead camera |
+| G in menu | Toggle Stability Assist; selection remains visible during driving |
 | P in menu | Corner Practice: repeatable approach, section time and exit speed |
 | B | Sound volume: 100%, 50%, muted |
 | R / Enter on results | Restart with a fresh countdown |
 | Q in the menu / Quit button | Quit the game |
 
 The menu shows the saved best eligible Manual flying lap for the current Track
-and steering policy. Autopilot laps, recovered laps, and the opening lap from
+and steering/assist policy. Autopilot laps, recovered laps, and the opening lap from
 the grid cannot set that record. Eligible improvements save at lap completion
 to `topdown-racer/records-v2.json` under the platform config directory (on macOS,
 `~/Library/Application Support`). The legacy `best_lap.txt` is retained separately
@@ -94,3 +95,24 @@ Drift/reverse snapshots, separated rivals, and wide/tall/small windows. These we
 scripted presentation snapshots, not human driving or motion-comfort testing;
 smoothness preference and motion comfort remain untested. Captures retained the
 fixture's GO overlay (and one focus-loss pause overlay), not a live Race sequence.
+
+
+## Four-wheel handling
+
+The simulation runs at 120 Hz with four internal tire-force steps per tick. Each
+wheel has its own load, surface, and grip limit. Ordinary gripped corners leave
+no tire marks or screech; brake lockup, wheelspin, and sliding mark the wheels
+that actually exceed their limit. Drift requires rear lateral saturation and
+countersteering, so understeer and wall spins do not earn Drift telemetry.
+
+The Car uses rear-wheel drive, a limited-slip differential, front-biased service
+brakes, a rear-only handbrake, and four automatic forward gears plus reverse.
+Engine pitch follows RPM and drops on shifts. Stability Assist defaults on for
+the player, adds only corrective yaw damping, and never reduces steering demand.
+AI Opponents use the same vehicle with the assist off.
+
+New Race and Corner Practice records use handling2 keys that also distinguish
+assist on/off. Existing records remain in records-v2.json under their old keys;
+they are preserved and never compared with the new handling. Authored Track
+geometry is unchanged. See [ADR-0005](docs/adr/0005-four-wheel-physics-and-120hz.md)
+for the cutover and timer decisions.

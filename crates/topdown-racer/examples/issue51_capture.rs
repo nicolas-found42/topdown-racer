@@ -26,7 +26,7 @@ fn main() {
         .add_plugins(RacerGamePlugin)
         .init_resource::<Frame>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(
-            std::time::Duration::from_secs_f64(1.0 / 64.0),
+            std::time::Duration::from_secs_f64(topdown_racer_core::simulation::FIXED_DT as f64),
         ))
         .insert_resource(bevy::winit::WinitSettings {
             focused_mode: bevy::winit::UpdateMode::Continuous,
