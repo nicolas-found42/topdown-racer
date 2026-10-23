@@ -59,6 +59,9 @@ and is not compared against current records.
 Pause freezes Race time. Resume has a one-second preparation interval. Recovery
 requires speed below 1 world unit/s and an unoccupied destination; it invalidates
 the current lap and has a three-second simulation-time cooldown.
+If the first destination is occupied, Recovery searches backward in one-unit
+steps along the preceding Track segment, keeping six units clear of every Car.
+It reports unavailability if none of those destinations is clear.
 Skid marks survive Recovery and the results screen; a fresh Race clears them.
 The renderer retains at most 2048 tire-mark quads, evicting the oldest first.
 Issue #45 capture evidence: [mid-Drift](docs/reviews/issue-45/mid-drift.png) and

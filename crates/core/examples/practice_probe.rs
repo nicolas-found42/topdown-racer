@@ -11,6 +11,7 @@ fn main() {
         let mut sim = challenge.start(track.clone());
         let mut attempt = PracticeAttempt::new(challenge);
         let mut driver = AiDriver::new(0);
+        let mut terminated = false;
         for tick in 0..4000 {
             let prev = sim.snapshots()[0];
             let field = [(prev.pose, prev.velocity)];
@@ -45,14 +46,17 @@ fn main() {
                     exit_speed,
                 } => {
                     println!("{kind} tick={tick} seconds={seconds} speed={exit_speed}");
+                    terminated = true;
                     break;
                 }
                 PracticeStatus::Invalid(reason) => {
                     println!("{kind} tick={tick} invalid={reason} pose={:?}", cur.pose);
+                    terminated = true;
                     break;
                 }
                 _ => {}
             }
         }
+        assert!(terminated, "{kind} practice attempt did not terminate");
     }
 }
