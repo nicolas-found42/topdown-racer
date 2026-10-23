@@ -31,7 +31,7 @@ fn main() {
             };
             input.throttle = if input.throttle > 0.0 { 1.0 } else { 0.0 };
             input.brake = if input.brake > 0.0 { 1.0 } else { 0.0 };
-            if kind == "late" && prev.pose.x < 136.0 && prev.pose.y < 8.0 {
+            if kind == "late" && prev.pose.x < 105.0 && prev.pose.y < 8.0 {
                 input.throttle = 1.0;
                 input.brake = 0.0;
             }

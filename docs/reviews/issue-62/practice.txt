@@ -1,0 +1,5 @@
+   Compiling topdown-racer-core v0.1.0 (/Users/nicolas/Documents/github/topdown-racer/crates/core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running `target/debug/examples/practice_probe`
+tidy tick=3294 seconds=25.050001 speed=18.621687
+late tick=3124 seconds=23.975 speed=18.619408

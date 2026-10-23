@@ -54,7 +54,7 @@ fn rolling_grid_near_finish_cannot_claim_an_untravelled_lap() {
 fn winner_leaves_the_manual_player_a_finish_window() {
     use topdown_racer_core::simulation::{CarInput, RacePhase};
     let mut sim = Sim::new_race(Track::parse(SAMPLE_CIRCUIT).unwrap(), 4);
-    for _ in 0..12000 {
+    for _ in 0..24000 {
         let snapshots = sim.tick(&[]);
         if snapshots.iter().any(|car| car.completed_laps == 3) {
             assert_eq!(sim.phase(), RacePhase::Racing);
@@ -140,8 +140,9 @@ fn equal_tick_finish_uses_stable_grid_order() {
             },
         ],
     );
+    sim.set_stability_assist(false);
     let mut driver = AiDriver::new(0);
-    for _ in 0..16000 {
+    for _ in 0..24000 {
         let previous = sim.snapshots();
         let car = previous[0];
         let field = [(car.pose, car.velocity)];
@@ -183,7 +184,7 @@ fn lapped_player_takes_flag_on_next_valid_crossing_after_winner() {
     let mut sim = Sim::new_race(track.clone(), 2);
     let mut driver = AiDriver::new(0);
     let mut winner = false;
-    for _ in 0..14000 {
+    for _ in 0..24000 {
         let previous = sim.snapshots();
         let car = previous[0];
         let field = [(car.pose, car.velocity)];
@@ -196,7 +197,7 @@ fn lapped_player_takes_flag_on_next_valid_crossing_after_winner() {
             track: &track,
             field: &field,
         });
-        input.throttle = input.throttle.min(0.2);
+        input.throttle = input.throttle.min(0.05);
         let current = sim.tick(&[input]);
         winner |= matches!(
             current[1].finish_status,
@@ -265,7 +266,7 @@ fn autopilot_lap_is_ineligible_for_a_manual_record() {
         sim.tick(&[]);
         ticks += 1;
         assert!(
-            ticks < 4000,
+            ticks < 6000,
             "autopilot must complete a lap; gave up after {ticks} ticks"
         );
     }
@@ -286,7 +287,7 @@ fn autopilot_lap_is_ineligible_for_a_manual_record() {
         sim.tick(&[]);
         ticks += 1;
         assert!(
-            ticks < 8000,
+            ticks < 12000,
             "autopilot must complete a second lap; gave up after {ticks} ticks"
         );
     }

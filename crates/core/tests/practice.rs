@@ -56,7 +56,7 @@ fn practice_times_only_the_section_and_freezes_at_exit() {
     assert_eq!(
         attempt.status(),
         PracticeStatus::Finished {
-            seconds: 20.0 / 64.0,
+            seconds: 20.0 * topdown_racer_core::simulation::FIXED_DT,
             exit_speed: 24.0
         }
     );
@@ -66,7 +66,7 @@ fn practice_times_only_the_section_and_freezes_at_exit() {
     assert_eq!(
         attempt.status(),
         PracticeStatus::Finished {
-            seconds: 20.0 / 64.0,
+            seconds: 20.0 * topdown_racer_core::simulation::FIXED_DT,
             exit_speed: 24.0
         }
     );

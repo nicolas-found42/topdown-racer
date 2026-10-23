@@ -1,8 +1,6 @@
 //! Procedural audio: engine/skid loop generation, playback systems, and
 //! mute/unmute state transitions.
 
-use topdown_racer_core::simulation::TOP_SPEED;
-
 use bevy::prelude::*;
 
 use topdown_racer_core::simulation::CarSnapshot;
@@ -20,24 +18,24 @@ pub struct EngineAudio;
 #[derive(Component)]
 pub struct SkidAudio;
 
-/// Pure function mapping forward speed to engine audio playback speed (pitch).
-/// Idle speed (forward_speed <= 0.0) plays at 0.8x.
-/// As forward speed increases to core's TOP_SPEED, pitch scales smoothly up to ~2.4x.
-pub fn engine_pitch_from_speed(forward_speed: f32) -> f32 {
-    let speed = forward_speed.abs();
-    0.8 + (speed / TOP_SPEED) * 1.6
+/// Engine playback follows drivetrain RPM, including pitch drops on upshifts.
+pub fn engine_pitch_from_rpm(rpm: f32) -> f32 {
+    0.8 + ((rpm - 900.0) / 5100.0).clamp(0.0, 1.0) * 1.6
 }
 
-/// Pure function computing skid sound volume from drift state.
-/// Returns 0.0 when not drifting; 0.6 while drifting.
-/// Speed eligibility is the simulation's own Drift contract (DRIFT_SPEED_MIN),
-/// so no shell-side speed gate is re-encoded here.
-pub fn skid_volume_from_drift(drifting: bool) -> f32 {
-    if drifting {
-        0.6
-    } else {
-        0.0
-    }
+/// Continuous tire excess; a gripped wheel contributes no screech.
+pub fn tire_volume_from_wheels(wheels: &[topdown_racer_core::simulation::WheelSnapshot; 4]) -> f32 {
+    wheels
+        .iter()
+        .map(|wheel| {
+            let surface_gain = if wheel.surface == topdown_racer_core::track::Surface::Road {
+                1.0
+            } else {
+                0.55
+            };
+            (wheel.normalized_slip - 1.0).clamp(0.0, 2.0) * 0.3 * surface_gain
+        })
+        .fold(0.0, f32::max)
 }
 
 /// Projected audio cues derived from a car snapshot.
@@ -49,8 +47,8 @@ pub(crate) struct AudioCue {
 /// Projects a car snapshot into engine pitch and skid volume cues.
 pub(crate) fn audio_cue_from_snapshot(snap: &CarSnapshot) -> AudioCue {
     AudioCue {
-        pitch: engine_pitch_from_speed(snap.forward_speed),
-        skid_volume: skid_volume_from_drift(snap.drifting),
+        pitch: engine_pitch_from_rpm(snap.engine_rpm),
+        skid_volume: tire_volume_from_wheels(&snap.wheels),
     }
 }
 
@@ -224,11 +222,11 @@ mod tests {
     use topdown_racer_core::track::{Track, SAMPLE_CIRCUIT};
 
     #[test]
-    fn engine_pitch_strictly_increases_with_forward_speed() {
-        let p0 = engine_pitch_from_speed(0.0);
-        let p10 = engine_pitch_from_speed(10.0);
-        let p20 = engine_pitch_from_speed(20.0);
-        let p30 = engine_pitch_from_speed(30.0);
+    fn engine_pitch_increases_with_rpm_and_falls_after_a_shift() {
+        let p0 = engine_pitch_from_rpm(900.0);
+        let p10 = engine_pitch_from_rpm(2000.0);
+        let p20 = engine_pitch_from_rpm(4000.0);
+        let p30 = engine_pitch_from_rpm(6000.0);
 
         assert!(
             p0 > 0.7 && p0 < 0.9,
@@ -249,16 +247,14 @@ mod tests {
     }
 
     #[test]
-    fn skid_volume_is_active_during_drift_and_silent_when_grip_recovers() {
-        // Grip recovers (drifting becomes false): silent
-        assert_eq!(skid_volume_from_drift(false), 0.0);
-
-        // Drifting: audible skid cue
-        let vol_drift = skid_volume_from_drift(true);
-        assert!(
-            vol_drift > 0.5,
-            "skid volume must be audible while drifting: got {vol_drift}"
-        );
+    fn tire_volume_follows_excess_and_is_silent_with_grip() {
+        let mut wheels = [topdown_racer_core::simulation::WheelSnapshot::default(); 4];
+        assert_eq!(tire_volume_from_wheels(&wheels), 0.0);
+        wheels[0].normalized_slip = 1.5;
+        let mild = tire_volume_from_wheels(&wheels);
+        wheels[0].normalized_slip = 3.0;
+        assert!(tire_volume_from_wheels(&wheels) > mild);
+        assert_eq!(tire_volume_from_wheels(&wheels), 0.6);
     }
 
     #[test]

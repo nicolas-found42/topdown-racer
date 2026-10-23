@@ -80,7 +80,7 @@ fn faster_car_completes_clean_pass_across_the_track_seam() {
     let mut near_ticks = 0;
     let mut contacts = 0;
     let mut severity = 0.0_f32;
-    for tick in 0..1800 {
+    for tick in 0..3600 {
         let snaps = sim.tick(&[]);
         if snaps[0].pose.distance(snaps[1].pose) < 28.0 {
             near_ticks += 1;
@@ -137,7 +137,7 @@ fn seam_overlap_reserves_both_sides_until_the_car_is_fully_clear() {
     // The seam is x=0 on the same straight: one Car projects near the end
     // of the loop while the other projects near its beginning.
     for side in [-1.0, 1.0] {
-        for gap in [-4.4_f32, 4.4] {
+        for gap in [-7.0_f32, -4.4, 4.4, 7.0] {
             let mut driver = AiDriver::new(1);
             let me = (Vec2::new(-gap / 2.0, side * 3.2), Vec2::new(12.0, 0.0));
             let rival = (Vec2::new(gap / 2.0, 0.0), Vec2::new(12.0, 0.0));
@@ -152,9 +152,9 @@ fn seam_overlap_reserves_both_sides_until_the_car_is_fully_clear() {
             });
             assert!(input.steer * side >= -0.001, "must not close the reserved lane across the seam: gap={gap}, side={side}, {input:?}");
         }
-        // Once the rival is wholly behind, return to the normal line.
-        let me = (Vec2::new(2.25, side * 3.2), Vec2::new(12.0, 0.0));
-        let rival = (Vec2::new(-2.25, 0.0), Vec2::new(12.0, 0.0));
+        // Finite steering response reserves a seven-unit gap; beyond it return to the line.
+        let me = (Vec2::new(3.6, side * 3.2), Vec2::new(12.0, 0.0));
+        let rival = (Vec2::new(-3.6, 0.0), Vec2::new(12.0, 0.0));
         let input = AiDriver::new(1).compute_input(AiView {
             active: None,
             car_index: 0,

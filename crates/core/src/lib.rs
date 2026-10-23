@@ -7,3 +7,5 @@ pub mod simulation;
 pub mod track;
 
 pub mod practice;
+
+mod vehicle;

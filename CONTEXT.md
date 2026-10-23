@@ -9,7 +9,7 @@ A closed-loop circuit defined as a data-driven center polyline plus a per-vertex
 _Avoid_: level, map, course
 
 **Car**:
-The player- or AI-driven vehicle simulated as a point mass with heading, longitudinal accel/brake/drag and lateral grip with slip angle.
+The player- or AI-driven vehicle, with four tires sharing the available grip under braking, acceleration, and cornering.
 _Avoid_: ship, sprite, body
 
 **Car Sprite**:
@@ -33,7 +33,7 @@ A decision-making driver that perceives the Track and other Cars each tick and a
 _Avoid_: bot, NPC, ghost
 
 **Drift**:
-Controlled lateral slip from the grip model, distinct from uncontrolled wall-slide.
+Controlled rear-tire slip past peak lateral grip, held with countersteering, distinct from understeer or a wall spin.
 _Avoid_: skid, slide, powerslide
 
 
@@ -42,7 +42,7 @@ The directional line across the Track shared by the painted checker and lap comp
 _Avoid_: finish radius, proximity finish
 
 **Eligible Flying Lap**:
-A complete lap after the standing-start lap, driven entirely in Manual without recovery. Its personal best belongs to the same Track, handling rules, and steering response.
+A complete lap after the standing-start lap, driven entirely in Manual without recovery. Its personal best belongs to the same Track, handling rules, steering response, and stability-assist setting.
 _Avoid_: unrestricted best, assisted record
 
 **Recovery**:
@@ -56,3 +56,7 @@ _Avoid_: Race, time-trial career
 **Practice Attempt**:
 One traversal of the Corner Practice section from its approach gate to its exit gate. Assistance, recovery, reverse gate crossings, skipped gates, and leaving the Track make it ineligible.
 _Avoid_: lap, Race result
+
+**Stability Assist**:
+An optional player aid that opposes excessive rotation during rear-tire slip while preserving full steering authority.
+_Avoid_: Autopilot, steering clamp

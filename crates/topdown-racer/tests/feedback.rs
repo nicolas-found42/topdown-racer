@@ -29,7 +29,7 @@ fn feedback_distinguishes_load_surface_and_bounded_contact_onset() {
 }
 
 #[test]
-fn stationary_contact_chatter_requires_eight_clear_ticks_to_rearm() {
+fn stationary_contact_chatter_requires_one_eighth_second_to_rearm() {
     let shell = ShellSimulation::new(Track::parse(HILLSIDE_CIRCUIT).unwrap());
     let mut car = shell.curr_snapshots[0];
     let mut mixer = FeedbackMixer::default();
@@ -42,7 +42,7 @@ fn stationary_contact_chatter_requires_eight_clear_ticks_to_rearm() {
         assert!(!mixer.step(&car).impact_started);
     }
     car.wall_contact = false;
-    for _ in 0..8 {
+    for _ in 0..15 {
         mixer.step(&car);
     }
     car.wall_contact = true;
@@ -55,7 +55,7 @@ fn slip_severity_rises_and_recovers_smoothly_without_braking_proxies() {
     let mut car = shell.curr_snapshots[0];
     car.heading = 0.0;
     car.velocity = glam::Vec2::new(20.0, 2.0);
-    car.drifting = true;
+    car.wheels[2].normalized_slip = 1.5;
     let mut mixer = FeedbackMixer::default();
     let initial = mixer.step(&car).tire_volume;
     let mut low = initial;
@@ -63,10 +63,10 @@ fn slip_severity_rises_and_recovers_smoothly_without_braking_proxies() {
         low = mixer.step(&car).tire_volume;
     }
     assert!(initial > 0.0 && low > initial);
-    car.velocity.y = 6.0;
+    car.wheels[2].normalized_slip = 2.5;
     let next = mixer.step(&car).tire_volume;
     assert!(next > low && next < 0.6);
-    car.drifting = false;
+    car.wheels[2].normalized_slip = 0.0;
     car.brake = 1.0;
     let release = mixer.step(&car).tire_volume;
     assert!(release > 0.0 && release < next);
@@ -117,7 +117,7 @@ fn stronger_impacts_scale_but_never_exceed_the_ceiling() {
         let frame = mixer.step(&car);
         assert!(frame.impact_started);
         volumes.push(frame.impact_volume);
-        for _ in 0..14 {
+        for _ in 0..28 {
             assert!(!mixer.step(&car).impact_started);
         }
         assert_eq!(mixer.step(&car).impact_volume, 0.0);

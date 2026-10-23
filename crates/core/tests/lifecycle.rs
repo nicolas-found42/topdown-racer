@@ -22,7 +22,7 @@ fn pause_and_deliberate_resume_preserve_the_fixed_tick_sequence() {
         assert_eq!(paused.tick(&[input]), frozen);
     }
     paused.resume();
-    for _ in 0..64 {
+    for _ in 0..topdown_racer_core::simulation::FIXED_HZ as u32 {
         paused.tick(&[input]);
     }
     for _ in 0..120 {
@@ -112,7 +112,7 @@ fn practice_starts_repeatably_and_rejects_assistance() {
     assert_eq!(a.snapshots(), b.snapshots());
     assert_eq!(a.snapshots().len(), 1);
     let mut attempt = PracticeAttempt::new(challenge);
-    for _ in 0..64 {
+    for _ in 0..topdown_racer_core::simulation::FIXED_HZ as u32 {
         a.tick(&[]);
     }
     let previous = a.snapshots()[0];
@@ -135,7 +135,7 @@ fn practice_scripted_manual_commands_finish_and_retry_identically() {
     let mut attempt = PracticeAttempt::new(challenge.clone());
     let mut repeated = PracticeAttempt::new(challenge);
     let mut driver = AiDriver::new(0);
-    for _ in 0..64 {
+    for _ in 0..topdown_racer_core::simulation::FIXED_HZ as u32 {
         sim.tick(&[]);
         retry.tick(&[]);
     }
@@ -192,7 +192,7 @@ fn pause_recovery_is_available_but_frozen_time_cannot_bypass_cooldown() {
     }
     assert_eq!(sim.recover_player(), Err(RecoveryError::Cooldown));
     sim.resume();
-    for _ in 0..64 {
+    for _ in 0..topdown_racer_core::simulation::FIXED_HZ as u32 {
         sim.tick(&[]);
     }
     assert_eq!(sim.recover_player(), Err(RecoveryError::Cooldown));
@@ -210,7 +210,7 @@ fn countdown_pause_and_preparation_do_not_consume_race_ticks() {
         assert_eq!(sim.tick(&[]), frozen);
     }
     sim.resume();
-    for _ in 0..64 {
+    for _ in 0..topdown_racer_core::simulation::FIXED_HZ as u32 {
         assert_eq!(sim.tick(&[]), frozen);
     }
     assert_eq!(sim.racing_ticks(), 0);
@@ -226,7 +226,7 @@ fn recovered_lap_is_invalid_but_next_full_manual_lap_is_eligible() {
     let mut sim = Sim::new(track.clone(), 1);
     sim.recover_player().unwrap();
     let mut driver = AiDriver::new(0);
-    for _ in 0..10000 {
+    for _ in 0..20000 {
         let previous = sim.snapshots()[0];
         let field = [(previous.pose, previous.velocity)];
         let input = driver.compute_input(AiView {

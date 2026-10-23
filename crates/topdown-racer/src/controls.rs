@@ -36,7 +36,10 @@ impl SteeringFilter {
             } else {
                 10.0
             };
-            self.applied += (target - self.applied).clamp(-rate / 64.0, rate / 64.0);
+            self.applied += (target - self.applied).clamp(
+                -rate * topdown_racer_core::simulation::FIXED_DT,
+                rate * topdown_racer_core::simulation::FIXED_DT,
+            );
         }
         self.applied
     }

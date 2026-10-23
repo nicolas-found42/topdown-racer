@@ -14,7 +14,10 @@ fn adapt(applied: &mut f32, target: f32, rise: f32) -> f32 {
         } else {
             1.0 / rise
         };
-        *applied += (target - *applied).clamp(-rate / 64.0, rate / 64.0);
+        *applied += (target - *applied).clamp(
+            -rate * topdown_racer_core::simulation::FIXED_DT,
+            rate * topdown_racer_core::simulation::FIXED_DT,
+        );
     }
     *applied
 }

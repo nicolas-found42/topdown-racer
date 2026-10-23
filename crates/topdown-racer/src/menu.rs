@@ -23,7 +23,11 @@ pub fn spawn_menu_ui(
     records: Res<crate::records::LocalRecords>,
     shell: Res<crate::ShellSimulation>,
 ) {
-    let key = crate::records::race_key(shell.sim.track(), shell.steering_response);
+    let key = crate::records::race_key(
+        shell.sim.track(),
+        shell.steering_response,
+        shell.sim.stability_assist(),
+    );
     let target_line = format_best_target(records.book.best(&key));
     spawn_overlay_root(&mut commands, 10.0, 0.92)
         .insert(MenuUi)
@@ -175,9 +179,14 @@ pub(crate) const CONTROL_HELP: &str = "T: Manual / Autopilot (release controls a
 pub(crate) fn driving_summary(shell: &crate::ShellSimulation) -> String {
     if shell.practice.is_some() {
         return format!(
-            "YOU: BLUE CAR #1 | {} | STEERING: {}\n{}",
+            "YOU: BLUE CAR #1 | {} | STEERING: {} | STABILITY: {} (G)\n{}",
             shell.sim.player_mode().label(),
             shell.steering_response.label(),
+            if shell.sim.stability_assist() {
+                "ON"
+            } else {
+                "OFF"
+            },
             topdown_racer_core::practice::CornerChallenge::HINT
         );
     }
@@ -190,16 +199,22 @@ pub(crate) fn driving_summary(shell: &crate::ShellSimulation) -> String {
         .first()
         .filter(|s| s.phase == topdown_racer_core::simulation::RacePhase::Racing)
         .and_then(|s| s.finish_window_ticks)
-        .map(|ticks| format!("  |  FINISH WINDOW {:.1}s", ticks as f32 / 64.0))
+        .map(|ticks| {
+            format!(
+                "  |  FINISH WINDOW {:.1}s",
+                ticks as f32 * topdown_racer_core::simulation::FIXED_DT
+            )
+        })
         .unwrap_or_default();
     format!(
-        "YOU: BLUE CAR #1 | {}{}\nPACE: {}{} | STEERING: {}\nF: Raw (instant) / Smooth (gentle rise, fast release)\nV: camera {} (menu)",
+        "YOU: BLUE CAR #1 | {}{}\nPACE: {}{} | STEERING: {}\nF: Raw (instant) / Smooth (gentle rise, fast release)\nV: camera {} (menu) | G: stability {} (menu)",
         shell.sim.player_mode().label(),
         if assisted { "  |  LAP ASSISTED" } else { "" },
         shell.selected_pace.label(),
         finish,
         shell.steering_response.label(),
-        shell.camera_mode.label()
+        shell.camera_mode.label(),
+        if shell.sim.stability_assist() { "ON" } else { "OFF" }
     )
 }
 
@@ -222,7 +237,11 @@ pub(crate) fn update_driving_summary(
             }
         );
     }
-    let key = crate::records::race_key(shell.sim.track(), shell.steering_response);
+    let key = crate::records::race_key(
+        shell.sim.track(),
+        shell.steering_response,
+        shell.sim.stability_assist(),
+    );
     for mut text in &mut targets {
         text.sections[0].value = format_best_target(records.book.best(&key));
     }
@@ -238,6 +257,10 @@ pub(crate) fn select_pace_system(
     buttons: Query<(&Interaction, &PaceButton), Changed<Interaction>>,
     mut shell: ResMut<crate::ShellSimulation>,
 ) {
+    if keyboard.just_pressed(KeyCode::KeyG) {
+        let enabled = !shell.sim.stability_assist();
+        shell.sim.set_stability_assist(enabled);
+    }
     if keyboard.just_pressed(KeyCode::KeyF) {
         shell.steering_response = match shell.steering_response {
             crate::controls::SteeringResponse::Raw => crate::controls::SteeringResponse::Smooth,
@@ -279,7 +302,7 @@ mod tests {
         let mut shell = crate::ShellSimulation::new(track);
         let mut snapshot = shell.sim.snapshots()[0];
         snapshot.phase = RacePhase::Racing;
-        snapshot.finish_window_ticks = Some(2880);
+        snapshot.finish_window_ticks = Some(topdown_racer_core::simulation::FINISH_WINDOW_TICKS);
         shell.curr_snapshots = vec![snapshot];
         assert!(
             driving_summary(&shell).contains("FINISH WINDOW 45.0s"),
@@ -290,5 +313,40 @@ mod tests {
         snapshot.finish_window_ticks = None;
         shell.curr_snapshots = vec![snapshot];
         assert!(!driving_summary(&shell).contains("FINISH WINDOW"));
+    }
+}
+
+#[cfg(test)]
+mod stability_tests {
+    use super::*;
+    #[test]
+    fn menu_toggle_survives_race_and_practice_restart_with_separate_records() {
+        let mut app = App::new();
+        app.insert_resource(crate::ShellSimulation::new(
+            topdown_racer_core::track::Track::parse(topdown_racer_core::track::HILLSIDE_CIRCUIT)
+                .unwrap(),
+        ))
+        .init_resource::<ButtonInput<KeyCode>>()
+        .add_systems(Update, select_pace_system);
+        let on = crate::practice::record_key(app.world().resource::<crate::ShellSimulation>());
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyG);
+        app.update();
+        let mut shell = app.world_mut().resource_mut::<crate::ShellSimulation>();
+        assert!(!shell.sim.stability_assist());
+        shell.reset_to_fresh_race();
+        assert!(!shell.sim.stability_assist());
+        shell.practice_selected = true;
+        shell.reset_to_fresh_race();
+        assert!(!shell.sim.stability_assist());
+        assert!(shell.practice.is_some());
+        let off = crate::practice::record_key(&shell);
+        assert_ne!(on, off);
+        assert!(off.contains("handling2") && off.contains("assistfalse"));
+        assert!(shell
+            .curr_snapshots
+            .iter()
+            .all(|snapshot| !snapshot.stability_assist));
     }
 }

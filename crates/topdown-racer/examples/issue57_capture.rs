@@ -43,7 +43,7 @@ fn main() {
         .add_plugins(RacerGamePlugin)
         .insert_resource(LocalRecords::from_path(path))
         .insert_resource(TimeUpdateStrategy::ManualDuration(
-            std::time::Duration::from_secs_f64(1.0 / 64.0),
+            std::time::Duration::from_secs_f64(topdown_racer_core::simulation::FIXED_DT as f64),
         ))
         .insert_resource(Probe {
             frame: 0,
@@ -120,7 +120,7 @@ fn drive(
         track: shell.sim.track(),
         field: &field,
     });
-    if probe.stage > 0 && car.pose.x < 136.0 && car.pose.y < 8.0 {
+    if probe.stage > 0 && car.pose.x < 105.0 && car.pose.y < 8.0 {
         input.throttle = 1.0;
         input.brake = 0.0;
     }

@@ -21,7 +21,7 @@ impl Default for FeedbackMixer {
     fn default() -> Self {
         Self {
             contact: false,
-            quiet_ticks: 8,
+            quiet_ticks: (topdown_racer_core::simulation::FIXED_HZ / 8.0) as u32,
             envelope: 0.0,
             previous_speed: 0.0,
             tire: 0.0,
@@ -35,7 +35,9 @@ impl FeedbackMixer {
         if !contact {
             self.quiet_ticks = self.quiet_ticks.saturating_add(1);
         }
-        let impact_started = contact && !self.contact && self.quiet_ticks >= 8;
+        let impact_started = contact
+            && !self.contact
+            && self.quiet_ticks >= (topdown_racer_core::simulation::FIXED_HZ / 8.0) as u32;
         if impact_started {
             let severity = car
                 .car_contact_speed
@@ -47,14 +49,9 @@ impl FeedbackMixer {
         }
         self.contact = contact;
         self.previous_speed = speed;
-        let left = Vec2::new(-car.heading.sin(), car.heading.cos());
-        let slip = car.velocity.dot(left).abs();
-        let tire_target = if car.drifting {
-            (slip / 10.0).clamp(0.1, 0.6)
-        } else {
-            0.0
-        };
-        self.tire += (tire_target - self.tire) * 0.2;
+        let tire_target = crate::audio::tire_volume_from_wheels(&car.wheels);
+        self.tire += (tire_target - self.tire)
+            * (1.0 - (-14.28 * topdown_racer_core::simulation::FIXED_DT).exp());
         let result = FeedbackFrame {
             engine_volume: 0.12 + car.throttle.clamp(0.0, 1.0) * 0.18,
             tire_volume: self.tire,
@@ -66,7 +63,7 @@ impl FeedbackMixer {
             impact_volume: self.envelope,
             impact_started,
         };
-        self.envelope = (self.envelope - 0.06).max(0.0);
+        self.envelope = (self.envelope - 3.84 * topdown_racer_core::simulation::FIXED_DT).max(0.0);
         result
     }
 }
@@ -269,7 +266,7 @@ mod tests {
                 .resource::<FeedbackState>()
                 .pending_impact
                 .is_none());
-            for _ in 0..20 {
+            for _ in 0..40 {
                 app.update();
             }
             assert_eq!(

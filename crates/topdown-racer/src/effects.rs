@@ -3,14 +3,15 @@ use glam::Vec2;
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug)]
-pub struct DriftSample {
+pub struct TireSample {
     pub pose: Vec2,
     pub heading: f32,
-    pub drifting: bool,
+    pub wheels: [topdown_racer_core::simulation::WheelSnapshot; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SkidMark {
+    pub surface: topdown_racer_core::track::Surface,
     pub center: Vec2,
     pub heading: f32,
     pub length: f32,
@@ -19,7 +20,7 @@ pub struct SkidMark {
 pub struct SkidDecals {
     capacity: usize,
     marks: VecDeque<SkidMark>,
-    previous: Vec<Vec2>,
+    previous: Vec<[Vec2; 4]>,
 }
 
 impl SkidDecals {
@@ -40,31 +41,36 @@ impl SkidDecals {
         self.previous.clear();
     }
 
-    pub fn step(&mut self, samples: &[DriftSample]) {
+    pub fn step(&mut self, samples: &[TireSample]) {
         for (i, sample) in samples.iter().enumerate() {
+            let forward = Vec2::from_angle(sample.heading);
+            let positions = sample.wheels.map(|wheel| {
+                sample.pose
+                    + forward * wheel.local_position.x
+                    + forward.perp() * wheel.local_position.y
+            });
             if i >= self.previous.len() {
-                self.previous.push(sample.pose);
+                self.previous.push(positions);
                 continue;
             }
-            let delta = sample.pose - self.previous[i];
-            let length = delta.length();
-            if sample.drifting && (0.25..3.0).contains(&length) {
-                let forward = Vec2::from_angle(sample.heading);
-                let left = Vec2::new(-forward.y, forward.x);
-                for side in [-1.0, 1.0] {
+            for (wheel, position) in positions.into_iter().enumerate() {
+                let previous = self.previous[i][wheel];
+                let delta = position - previous;
+                let length = delta.length();
+                if sample.wheels[wheel].beyond_limit && (0.25..3.0).contains(&length) {
                     self.marks.push_back(SkidMark {
-                        center: (sample.pose + self.previous[i]) * 0.5 - forward * 1.1
-                            + left * side * 0.85,
+                        center: (position + previous) * 0.5,
                         heading: delta.y.atan2(delta.x),
                         length,
+                        surface: sample.wheels[wheel].surface,
                     });
+                    while self.marks.len() > self.capacity {
+                        self.marks.pop_front();
+                    }
                 }
-                while self.marks.len() > self.capacity {
-                    self.marks.pop_front();
+                if !sample.wheels[wheel].beyond_limit || length >= 0.25 {
+                    self.previous[i][wheel] = position;
                 }
-            }
-            if !sample.drifting || length >= 0.25 {
-                self.previous[i] = sample.pose;
             }
         }
         self.previous.truncate(samples.len());
@@ -156,10 +162,10 @@ fn advance_effects(shell: Res<ShellSimulation>, mut effects: ResMut<DrivingEffec
     let samples: Vec<_> = shell
         .curr_snapshots
         .iter()
-        .map(|car| DriftSample {
+        .map(|car| TireSample {
             pose: car.pose,
             heading: car.heading,
-            drifting: car.drifting,
+            wheels: car.wheels,
         })
         .collect();
     effects.decals.step(&samples);
@@ -176,6 +182,11 @@ fn render_decals(
                 *visibility = Visibility::Visible;
             }
             sprite.custom_size = Some(Vec2::new(mark.length + 0.125, 0.25));
+            sprite.color = if mark.surface == topdown_racer_core::track::Surface::Road {
+                Color::srgba(0.04, 0.03, 0.03, 0.65)
+            } else {
+                Color::srgba(0.3, 0.22, 0.12, 0.45)
+            };
             *transform = Transform::from_xyz(mark.center.x, mark.center.y, world_z::SKID)
                 .with_rotation(Quat::from_rotation_z(mark.heading));
         } else if *visibility != Visibility::Hidden {
@@ -237,17 +248,17 @@ fn step_particles(
     effects.particles.retain(|p| match p.kind {
         // Smoke must disappear on release, even between emission ticks.
         ParticleKind::Smoke(car_index) => {
-            p.age < 24
+            p.age < 45
                 && cars.get(car_index).is_some_and(|car| {
                     car.handbrake
                         && car.phase == topdown_racer_core::simulation::RacePhase::Racing
                         && car.finish_status == topdown_racer_core::simulation::FinishStatus::Racing
                 })
         }
-        ParticleKind::Streak => p.age < 8,
-        ParticleKind::Dust => p.age < 24,
+        ParticleKind::Streak => p.age < 15,
+        ParticleKind::Dust => p.age < 45,
     });
-    if !effects.tick.is_multiple_of(4) {
+    if !effects.tick.is_multiple_of(8) {
         return;
     }
     for (i, car) in cars.iter().enumerate() {
@@ -312,8 +323,8 @@ fn render_particles(
         };
         *visibility = Visibility::Visible;
         let lifetime = match particle.kind {
-            ParticleKind::Streak => 8.0,
-            _ => 24.0,
+            ParticleKind::Streak => 15.0,
+            _ => 45.0,
         };
         let alpha = 1.0 - particle.age as f32 / lifetime;
         match particle.kind {
@@ -376,7 +387,7 @@ mod skid_lifecycle_tests {
                     pose: Vec2::new(2.0, 3.0),
                     heading: 0.0,
                     kind: ParticleKind::Dust,
-                    age: 23,
+                    age: 44,
                 }]),
                 tick: 0,
             })
@@ -389,18 +400,18 @@ mod skid_lifecycle_tests {
             app.update();
             let effects = app.world().resource::<DrivingEffects>();
             assert_eq!(effects.particles.len(), 1);
-            assert_eq!(effects.particles[0].age, 23);
+            assert_eq!(effects.particles[0].age, 44);
             assert_eq!(effects.particles[0].pose, Vec2::new(2.0, 3.0));
         }
         app.world_mut()
             .resource_mut::<ShellSimulation>()
             .sim
             .resume();
-        for _ in 0..64 {
+        for _ in 0..topdown_racer_core::simulation::FIXED_HZ as u32 {
             app.update();
             assert_eq!(
                 app.world().resource::<DrivingEffects>().particles[0].age,
-                23
+                44
             );
             app.world_mut()
                 .resource_mut::<ShellSimulation>()
@@ -432,7 +443,10 @@ mod skid_lifecycle_tests {
         {
             let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
             shell.curr_snapshots[0].pose.x += 1.0;
-            shell.curr_snapshots[0].drifting = true;
+            for wheel in &mut shell.curr_snapshots[0].wheels[2..] {
+                wheel.beyond_limit = true;
+                wheel.normalized_slip = 1.5;
+            }
         }
         app.update();
         let marks: Vec<_> = app
@@ -505,7 +519,10 @@ mod skid_lifecycle_tests {
         {
             let mut shell = app.world_mut().resource_mut::<ShellSimulation>();
             shell.curr_snapshots[0].pose.x += 1.0;
-            shell.curr_snapshots[0].drifting = true;
+            for wheel in &mut shell.curr_snapshots[0].wheels[2..] {
+                wheel.beyond_limit = true;
+                wheel.normalized_slip = 1.5;
+            }
         }
         app.update();
         let mark_count = app
@@ -705,7 +722,7 @@ mod dust_streak_tests {
             let cars = snapshots(surface, 10.0);
             assert!(cars.iter().all(|car| car.surface == surface));
             let mut effects = effects();
-            advance(&cars, &mut effects, 4);
+            advance(&cars, &mut effects, 8);
             assert_eq!(
                 effects
                     .particles
@@ -733,7 +750,7 @@ mod dust_streak_tests {
         .snapshots();
         assert_eq!(cars[0].surface, Surface::Grass);
         let mut effects = effects();
-        advance(&cars, &mut effects, 4);
+        advance(&cars, &mut effects, 8);
         assert!(effects
             .particles
             .iter()
@@ -747,7 +764,7 @@ mod dust_streak_tests {
             car.pose += Vec2::new(0.0, i as f32 * 20.0);
         }
         let mut effects = effects();
-        advance(&cars, &mut effects, 4);
+        advance(&cars, &mut effects, 8);
         assert_eq!(effects.particles.len(), 2);
         assert!(
             effects
@@ -761,7 +778,7 @@ mod dust_streak_tests {
         for speed in [0.0, 10.0, 26.0] {
             cars[0].velocity = Vec2::new(speed, 0.0);
             effects.particles.clear();
-            advance(&cars, &mut effects, 4);
+            advance(&cars, &mut effects, 8);
             assert!(effects.particles.is_empty(), "player speed {speed}");
         }
     }
@@ -770,7 +787,7 @@ mod dust_streak_tests {
     fn stopping_emission_expires_dust_and_streaks() {
         let mut cars = snapshots(Surface::Gravel, 30.0);
         let mut effects = effects();
-        advance(&cars, &mut effects, 4);
+        advance(&cars, &mut effects, 8);
         assert!(effects
             .particles
             .iter()
@@ -782,7 +799,7 @@ mod dust_streak_tests {
         for car in &mut cars {
             car.velocity = Vec2::ZERO;
         }
-        advance(&cars, &mut effects, 8);
+        advance(&cars, &mut effects, 15);
         assert!(!effects
             .particles
             .iter()
@@ -791,7 +808,7 @@ mod dust_streak_tests {
             .particles
             .iter()
             .any(|p| matches!(p.kind, ParticleKind::Dust)));
-        advance(&cars, &mut effects, 16);
+        advance(&cars, &mut effects, 30);
         assert!(effects.particles.is_empty());
     }
 }
